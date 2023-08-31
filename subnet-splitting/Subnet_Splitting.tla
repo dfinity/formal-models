@@ -42,26 +42,6 @@ These are the rules for receiving signals (formalized in the Induct_Signal actio
     - Request: this should never happen
     - Response: garbage collect the response and re-schedule the response according to the current routing table 
 
-***************
-Execution rules
-***************
-
-These are the rules for automatically deleting canister state:
-    - Delete state of canister C if C is not on local subnet according to routing table
-
-This is the rule for putting canisters into the starting state:
-    - Subnet S puts C into the starting state when:
-        - S starts from a genesis CUP
-        - C is hosted on S according to the routing table
-        - S is the last entry on the migration list for C according to the routing table
-
-These are the rules for handling messages from canisters that are in the starting state:
-    1. All requests in C's output queues (as opposed to streams) receive local reject responses.
-
-These are the rules for transitioning canisters from the starting state to the running state:
-    1. When C has no more open call contexts, it goes into the running state.
-
-
 *******************
 Migration Procedure
 *******************
@@ -70,19 +50,22 @@ Formalized in the Migration_Procedure action.
 
 If canister C is moved from subnet A to (the newly created) subnet B during a subnet split:
 
+0. The subnet B is created. This part is not modeled, we assume that the target already exists.
 1. Add A and B to “migrating list” for canister C in registry in that order (A before B).
 2. After all subnets observed this registry change, start migration process.
     2.1 Subnet A halts and produces final CUP
-    2.2 Someone fetches final CUP from subnet A, creates recovery CUPs for subnets A and B with same state hash.
-    2.3 Atomically make registry change with new recovery CUPs and updated routing table.
-    2.4 When subnet A first starts up from recovery CUP, it observes routing table change and will delete state of C. Likewise, when B starts up, it deletes state of canisters remaining on A.
-    2.5 C goes into starting state on subnet B.
-    2.6 When all open call contexts are closed, C goes into running state.
-3. When:
-    - step 2 completes (i.e., C starts running)
-    - A doesn’t have any more responses from C in any of its outgoing streams
-    - no subnet has a message for C in its outgoing stream to A
-    then remove A from migrating list for C.
+    2.2 Someone fetches final CUP from subnet A, creates recovery CUPs for subnets A and B with appropriate state hash.
+    2.3 Update the routing table in the registry.
+    2.4 Recover the subnets A and B with the appropriate state.
+    Steps 2.1-2.4 are modeled as an atomic step for simplicity.
+3. Execute the following in any order.
+   3.1. When:
+        - step 2 completes
+        - subnet A delivers all messages to other subnets that were in its outgoing streams at the time it was halted
+    then unhalt subnet B
+   3.2. When step 2 completes, record the indices of the ends of all outgoing streams from other subnets to A. Then
+    3.2.1 When all the subnets have garbage collected the above indices, record the outgoing indices from A to all other subnets.
+    3.2.3 When A delivers all messages from the previous step, clear the migrating list for C
 
 *****************
 TLA+ cheat sheets
@@ -99,44 +82,57 @@ where h[x] = f[x] if x \in DOMAIN f and h[x] = g[x] otherwise
 x :> y is a function f whose domain is {x}, and f[x] = y
 
 ---- MODULE Subnet_Splitting ----
-EXTENDS TLC, Sequences, Naturals, FiniteSets
+EXTENDS TLC, Sequences, Naturals, FiniteSets, Apalache, Variants, SequencesExt
 
 \******************************************************
 \* General utility definitions
+\* @type: (a -> b) => Set(b);
 Range(f) == { f[x] : x \in DOMAIN f }
-To_Set(seq) == Range(seq)
+\* @type: Seq(a) => Set(a);
+\* To_Set(seq) == ApaFoldSeqLeft(LAMBDA x, y: {y} \union x, {}, seq)
+To_Set(X) == ToSet(X)
+\* @type: ((a -> b), Set(a)) => a -> b;
 Remove_Arguments(f, S) == [ y \in DOMAIN f \ S |-> f[y] ]
 Remove_Argument(f, x) == Remove_Arguments(f, {x})
-Last(seq) == seq[Len(seq)]
+\* Last(seq) == seq[Len(seq)]
 
 \******************************************************
 \* Constants that define the bounds on the model.
 \* If you want to perform model checking with more subnets,
 \* canisters, more requests or migrations, this is the place.
 
-SUBNET_ID_LIST == << "s1", "s2", "s3" >>
-SUBNET_ID == To_Set(SUBNET_ID_LIST)
-CANISTER_ID_LIST == << "c1", "c2", "c3" >>
-CANISTER_ID == To_Set(CANISTER_ID_LIST)
-INIT_ROUTING_TABLE == 
-  LET 
-    s == SUBNET_ID_LIST
-    c == CANISTER_ID_LIST
-  IN
-    c[1] :> [ on |-> s[1], migration_list |-> << >> ] 
-    @@
-    c[2] :> [ on |-> s[2], migration_list |-> << >> ]
-    @@
-    c[3] :> [ on |-> s[1], migration_list |-> << >> ]
+\* The following differ for each scenario, so they are instantiated later
+CONSTANT 
+    \* @type: Seq($subnetId);
+    SUBNET_ID_LIST,
+    \* @type: Seq($canisterId);
+    CANISTER_ID_LIST,
+    \* Specifies where canisters are located. Differs for each s
+    \* @type: $canisterId -> { on: $subnetId, migration_list: Seq($subnetId)};
+    INIT_ROUTING_TABLE,
+    \* @type: Set($canisterId);
+    \* Which canisters exist initially. Canisters from CANISTER_ID_LIST may still exist in
+    \* the routing table, without actually having state on their "hosting" subnet. This models
+    \* the canister ranges in the routing table, which may (and normally do) contain canisters
+    \* which do not exist.
+    INITIAL_EXISTING,
+    \* @type: Set($canisterId) -> { from: $subnetId, to: $subnetId };
+    CANISTERS_TO_MIGRATE
 
-\* To adapt the model to subnet splitting, we here assume that s3 starts as an empty
-\* subnet, and that we move c1 to s3.
-CANISTERS_TO_MIGRATE == 
-  LET 
+SUBNET_ID == To_Set(SUBNET_ID_LIST)
+
+CANISTER_ID == To_Set(CANISTER_ID_LIST)
+
+
+INIT_SUBNET_INFO ==
+  LET
     s == SUBNET_ID_LIST
-    c == CANISTER_ID_LIST
   IN
-    c[1] :> [ from |-> s[1], to |-> s[3]]
+    s[1] :> [ is_halted |-> FALSE ]
+    @@
+    s[2] :> [ is_halted |-> FALSE ]
+    @@
+    s[3] :> [ is_halted |-> TRUE ]
 
 \* Requests can be issued at any time. Since we assign an increasing
 \* ordinal number to every request (in order to distinguish multiple
@@ -154,94 +150,214 @@ MAX_MIGRATIONS == 1
 
 MAX_RESCHEDULINGS == 1
 
+\* @typeAlias: canisterId = Str;
+\* @typeAlias: subnetId = Str;
+\* @typeAlias: message = { type: Str, from: $canisterId, to: $canisterId, id: Int };
+\* @typeAlias: signal = { type: Str, index: Int };
+\* @typeAlias: canisterRunState = C_Running(UNIT) | C_Stopping(UNIT);
+_dummy_alias_constant == TRUE
+
 \******************************************************
 \* Named constants to help with readability/consistency
 \* of the model
-RUNNING == "RUNNING"
-STOPPING == "STOPPING"
-STARTING == "STARTING"
-MIG_STARTED == "MIG_STARTED"
-MIG_SWITCHED == "MIG_SWITCHED"
+RUNNING == Variant("C_Running", UNIT)
+STOPPING == Variant("C_Stopping", UNIT)
+
+\* @typeAlias: migrationListRemovalPhase = To_Parent($subnetId -> Int) | From_Parent($subnetId -> Int) | Removed_From_List(UNIT);
+\* @type: $migrationListRemovalPhase;
+Removed_From_List == Variant("Removed_From_List", UNIT)
+\* @type: ($subnetId -> Int) => $migrationListRemovalPhase;
+To_Parent(indices) == Variant("To_Parent", indices)
+\* @type: ($subnetId -> Int) => $migrationListRemovalPhase;
+From_Parent(indices) == Variant("From_Parent", indices)
+\* @typeAlias: unhaltingPhase = Has_Outgoing($subnetId -> Int) | Unhalting_Done(UNIT);
+\* @type: $unhaltingPhase;
+Unhalting_Done == Variant("Unhalting_Done", UNIT)
+\* @type: ($subnetId -> Int) => $unhaltingPhase;
+Has_Outgoing(indices) == Variant("Has_Outgoing", indices)
+\* @typeAlias: migrationState = 
+\*  Mig_Started(Int)
+\*  | Mig_Switched({switch_version: Int, stream_index_for_unhalting: $unhaltingPhase, stream_index_for_migration_list: $migrationListRemovalPhase}) 
+\*  | Mig_Done(UNIT);
+\* @type: Int => $migrationState;
+MIG_STARTED(registry_version) == Variant("Mig_Started", registry_version)
+\* @type: $migrationState => Bool;
+Is_Mig_Started(mig_state) == VariantTag(mig_state) = "Mig_Started"
+\* @type: $migrationState => Int;
+Get_Start_Version(state) == VariantGetUnsafe("Mig_Started", state)
+\* @type: $migrationState => Bool;
+Is_Mig_Switched(mig_state) == VariantTag(mig_state) = "Mig_Switched"
+\* @type: ({ switch_version: Int, stream_index_for_unhalting: $unhaltingPhase, stream_index_for_migration_list: $migrationListRemovalPhase}) => $migrationState;
+MIG_SWITCHED(data) == Variant("Mig_Switched", data)
+\* @type: $migrationState => Int;
+Get_Switched_Version(migration_state) == VariantGetUnsafe("Mig_Switched", migration_state).switch_version
+\* @type: $migrationState => Bool;
+Watching_Indices_To_Parent(migration_state) ==
+    /\ Is_Mig_Switched(migration_state) 
+    /\ 
+      LET s == VariantGetUnsafe("Mig_Switched", migration_state)
+      IN
+        /\ VariantTag(s.stream_index_for_migration_list)  = "To_Parent"
+\* @type: $migrationState => $subnetId -> Int;
+Get_Switched_Indices_To_Parent(migration_state) == VariantGetUnsafe("To_Parent", VariantGetUnsafe("Mig_Switched", migration_state).stream_index_for_migration_list)
+\* @type: $migrationState => Bool;
+Watching_Indices_From_Parent(migration_state) ==
+    /\ Is_Mig_Switched(migration_state) 
+    /\ 
+      LET s == VariantGetUnsafe("Mig_Switched", migration_state)
+      IN
+        /\ VariantTag(s.stream_index_for_migration_list) = "From_Parent"
+\* @type: ($migrationState, $migrationListRemovalPhase) => $migrationState;
+Set_Migration_List_Index(migration_state, index) == 
+  LET
+    current == VariantGetUnsafe("Mig_Switched", migration_state)
+  IN
+    MIG_SWITCHED([ current EXCEPT !.stream_index_for_migration_list = index ])
+\* @type: ($migrationState, $subnetId, Int) => $migrationState;
+Set_Switched_Index_To_Parent(migration_state, subnet_id, index) ==
+    Set_Migration_List_Index(migration_state, To_Parent(subnet_id :> index @@ Get_Switched_Indices_To_Parent(migration_state)))
+
+\* @type: $migrationState => Bool;
+Done_Observing_Streams(migration_state) ==
+    /\ Is_Mig_Switched(migration_state)
+    /\ VariantTag(VariantGetUnsafe("Mig_Switched", migration_state).stream_index_for_migration_list) # "Removed_From_List"
+\* @type: ($migrationState, $unhaltingPhase) => $migrationState;
+Set_Unhalting_Index(migration_state, index) == 
+  LET
+    current == VariantGetUnsafe("Mig_Switched", migration_state)
+  IN
+    MIG_SWITCHED([ current EXCEPT !.stream_index_for_unhalting = index ])
+\* @type: $migrationState => Bool;
+Done_Unhalting(migration_state) ==
+    /\ Is_Mig_Switched(migration_state)
+    /\ VariantTag(VariantGetUnsafe("Mig_Switched", migration_state).stream_index_for_unhalting) = "Unhalting_Done"
+\* @type: $migrationState => ($subnetId -> Int);
+Get_Unhalting_Indices(migration_state) ==
+    VariantGetUnsafe("Has_Outgoing", VariantGetUnsafe("Mig_Switched", migration_state).stream_index_for_unhalting)
+
+\* @type: $migrationState => $subnetId -> Int;
+Get_Switched_Indices_From_Parent(migration_state) == VariantGetUnsafe("From_Parent", VariantGetUnsafe("Mig_Switched", migration_state).stream_index_for_migration_list)
 
 \* Global state:
 VARIABLE 
     \* Directional inter-subnet streams
-    stream, \* (SubnetId, SubnetId) -> [Messages]
-    \* A list of routing tables, one for each successive registry version
-    routing_table, \* [ CanisterId -> record with fields:
-       \* on: SubnetId
-       \* migration_list: [SubnetId]
+    \* @typeAlias: msgStreams = << $subnetId, $subnetId >> -> Seq($message);
+    \* @type: $msgStreams;
+    stream,
+    \* A list of registries, one for each successive registry version
+    \* @typeAlias: routingTable = $canisterId -> {on: $subnetId, migration_list: Seq($subnetId) };
+    \* @typeAlias: registries = Seq({
+    \*      routing_table: $routingTable,
+    \*      subnet_info: $subnetId -> { is_halted: Bool }
+    \* });
+    \* @type: $registries;
+    registry,
     \* A directional inter-subnet stream of headers; headers are processed
     \* in the order they are emitted, so a stream works fine here.
-    headers, \* (SubnetId, SubnetId) -> [ Signal ] 
+    \* @typeAlias: hdrStreams = << $subnetId, $subnetId >> -> Seq($signal);
+    \* @type: $hdrStreams;
+    headers,
     \* The state of each subnet
-    subnet, \* SubnetId -> Record with fields:
-      \* incoming_index: Nat - index into the remote subnet's outgoing stream, of what we've consumed
-      \* outgoing_index: Nat - index into local outgoing stream to a subnet, saying what the remote 
-      \*                                    subnet has acknowledged so far (used for garbage collection - which is not modelled)
-      \* registry_version: Nat - local registry version
-      \* canister: CanisterId -> CanisterState - state kept for canisters; not a total function, it's defined only for the canisters
-      \*           kept on the local subnet, and the state is a record with fields as follows:
-      \*    state: RUNNING | STOPPING | STARTING - these three states are modeled
-      \*    queue: [{message: Message, processed: Bool}] - the canister input queue. Deviates from the implementation in that it's append-only: for each 
-      \*                               we also keep a flag saying whether it has been processed, unlike the real queue that removes
-      \*                               the message. This simplifies the specification of our in-order, at-most-once delivery.
-      \*    pending: Nat - how many responses are pending for the canister (i.e., the count of call contexts)
+    \* @typeAlias: canisterState = {
+    \*      state: $canisterRunState,
+    \*      queue: Seq({message: $message, processed: Bool}), // the canister input queue. Deviates from the implementation in that it's append-only. 
+    \*                                                        // For each we also keep a flag saying whether it has been processed, unlike the real queue that removes the message. 
+    \*                                                        // This simplifies the specification of our in-order, at-most-once delivery. 
+    \*      pending: Int
+    \* }; 
+    \* @typeAlias: subnetState = {
+    \*      incoming_index: $subnetId -> Int, // index into the remote subnet's outgoing stream, of what we've consumed
+    \*      outgoing_index: $subnetId -> Int,  // index into local outgoing stream to a subnet, saying what the remote subnet has acknowledged so far (used for garbage collection - which is not modelled)
+    \*      registry_version: Int, // local registry version
+    \*      canister: $canisterId -> $canisterState // State kept for canisters. Not a total function, it's defined only for the canisters kept on the local subnet
+    \* };
+    \* @typeAlias: subnets = $subnetId -> $subnetState;
+    \* @type: $subnets;
+    subnet, 
     \* A counter used to order and distinguish requests
+    \* @type: Int;
     next_req_id,
     \* Control information for the (manual) migration process, a map from CanisterId to the record with fields:
-    \* state: MIG_STARTED | ... - the last executed step of the procedure
-    \* registry_version: Nat - the registry version when the migration was started
-    \* registry_version_of_switch: Nat - the registry version when the switch happened
+    \* @typeAlias: migrationProcedure = Set($canisterId) -> $migrationState;
+    \* @type: $migrationProcedure;
     migration_procedure,
     \* Count how many migrations we've done so far, such that we can limit
     \* the total number of migrations in the state space
+    \* @type: Int;
     migration_count,
     \* Count how many times a response has been rescheduled due to a reject signal.
     \* Constant rescheduling (without updating the routing table in the meantime) could 
     \* yield an unbounded state space; we use this count to bound the space.
-    \* Type is SubnetId -> Nat
+    \* @type: $subnetId -> Int;
     rescheduling_count
 
-vars == << stream, routing_table, headers, subnet, next_req_id, migration_procedure, migration_count, rescheduling_count >>
+vars == << stream, registry, headers, subnet, next_req_id, migration_procedure, migration_count, rescheduling_count >>
+
+\* @type: ($routingTable, $canisterId) => $subnetId;
+Hosting_Subnet(routing, canister_id) ==
+    routing[canister_id].on
 
 Hosted(routing, canister_id, subnet_id) ==
-    routing[canister_id].on = subnet_id
+    Hosting_Subnet(routing, canister_id) = subnet_id
 
-All_Hosted(routing, subnet_id) == { c \in CANISTER_ID: Hosted(routing, c, subnet_id)}
+\* @type: ($routingTable, $canisterId) => Seq($subnetId);
+Migration_List(routing, canister_id) ==
+    routing[canister_id].migration_list
 
-Current_Table == Last(routing_table)
+All_Hosted(routing, subnet_id) == { c \in CANISTER_ID: Hosted(routing, c, subnet_id) }
 
-RECURSIVE String_Of_Elements(_)
-String_Of_Elements(S) ==
-    IF S = {}
-    THEN ""
-    ELSE CHOOSE x \in S: 
-        LET rest == S \ {x}
-        IN
-            IF rest = {}
-            THEN x
-            ELSE x \o ", " \o String_Of_Elements(rest)
+Current_Table == Last(registry).routing_table
+Current_Subnet_Info == Last(registry).subnet_info
 
-Set_To_String(S) == "{" \o String_Of_Elements(S) \o "}"
+Empty_Subnet_State(canisters) == [
+    incoming_index |-> [ s2 \in SUBNET_ID |-> 0 ],
+    outgoing_index |-> [ s2 \in SUBNET_ID |-> 0 ],
+    registry_version |-> 1,
+    canister |-> [c \in canisters |-> 
+        [ state |-> RUNNING, queue |-> << >>, pending |-> 0]  
+    ]
+  ]
 
-Apply_Registry_Update(rts, rt_version, s, subnet_id) ==
+Empty_Canister_State == [
+    state |-> RUNNING,
+    queue |-> <<>>,
+    pending |-> 0
+]
+
+Subnet_Thinks_Its_Stopped(subnet_id) ==
+    \/ subnet_id \notin DOMAIN subnet
+    \/ subnet_id \notin DOMAIN registry[subnet[subnet_id].registry_version].subnet_info
+    \/ registry[subnet[subnet_id].registry_version].subnet_info[subnet_id].is_halted
+
+
+\* Apalache doesn't like string concatenation
+\* String_Of_Elements(S) == ApaFoldSet(LAMBDA x, y: y \o ", " \o x, "", S)
+\* Set_To_String(S) == "{" \o String_Of_Elements(S) \o "}"
+
+\* @type: ($registries, Int, $subnets, $subnetId) => $subnets;
+Apply_Registry_Update(registries, registry_version, s, subnet_id) ==
   LET
-    rt == rts[rt_version]
+    reg == registries[registry_version]
+    rt == reg.routing_table
+    \* TODO: we should probably only allow this if the subnet is unhalted,
+    \* but we'd need to make Split_State more fine-grained for this to work
+    \* (as we rely on applying the registry update on the parent in order to trim
+    \* the state of the existing canisters)
     state == s[subnet_id]
-    canisters_to_remove == { c \in DOMAIN state.canister: /\ rt[c].on # subnet_id  }
+    canisters_to_remove == { c \in DOMAIN state.canister: /\ ~Hosted(rt, c, subnet_id)  }
     canisters_to_start == { c \in DOMAIN state.canister:
-            /\ rt[c].migration_list # << >> 
-            /\ Last(rt[c].migration_list) = subnet_id
+            /\ Migration_List(rt, c) # << >> 
+            /\ Last(Migration_List(rt, c)) = subnet_id
         }
     intersection == canisters_to_remove \intersect canisters_to_start
     check == Assert(intersection = {},
-        "Subnet " \o subnet_id \o " doesn't know whether to start or remove canisters " \o Set_To_String(intersection))
+        "Subnet doesn't know whether to start or remove canisters " \* \o Set_To_String(intersection)
+        \* "Subnet " \o subnet_id \o " doesn't know whether to start or remove canisters " \* \o Set_To_String(intersection)
+    )
   IN
     [ s EXCEPT ![subnet_id] = [ @ EXCEPT 
-            !.registry_version = rt_version, 
-            !.canister = LET trimmed == Remove_Arguments(@, canisters_to_remove)
-                IN [ c \in canisters_to_start |-> [ trimmed[c] EXCEPT !.state = STARTING ] ] @@ trimmed
+            !.registry_version = registry_version, 
+            !.canister = Remove_Arguments(@, canisters_to_remove)
         ]
       ]
 
@@ -250,80 +366,99 @@ Update_Local_Registry(subnet_id) ==
   LET
     s == subnet[subnet_id]
   IN
-    /\ \E new_version \in s.registry_version + 1..Len(routing_table):
-        /\ subnet' = Apply_Registry_Update(routing_table, new_version, subnet, subnet_id)
-    /\ UNCHANGED << stream, routing_table, headers, next_req_id, migration_procedure, migration_count, rescheduling_count >>
+    /\ \E new_version \in s.registry_version + 1..Len(registry):
+        /\ subnet' = Apply_Registry_Update(registry, new_version, subnet, subnet_id)
+    /\ UNCHANGED << stream, registry, headers, next_req_id, migration_procedure, migration_count, rescheduling_count >>
 
+\* @type: ($subnetId -> $subnetState, $subnetId, $canisterId, $canisterRunState) => ($subnetId -> $subnetState);
 Update_Canister_State(s, subnet_id, canister_id, state) == [ s EXCEPT ![subnet_id] = 
         [ @ EXCEPT !.canister = [ @ EXCEPT ![canister_id] = [ @ EXCEPT !.state = state ] ] ]
     ]
 
-\* Transition from starting to started state. Note that on the IC, canisters
+\* Transition from stopped to started state. Note that on the IC, canisters
 \* can also transition from the stopped into the started state, but we don't
-\* modeled this transition in this model.
+\* modeled the stopped state in this model; it's equivalent to STOPPING without
+\* having any pending responses.
 Start_Canister(canister_id, subnet_id) ==
     /\ canister_id \in DOMAIN subnet[subnet_id].canister
     /\ LET
             c == subnet[subnet_id].canister[canister_id]
        IN
-            /\ c.state = STARTING
+            /\ c.state = STOPPING
             /\ c.pending = 0
             /\ subnet' = Update_Canister_State(subnet,  subnet_id, canister_id, RUNNING)
-            /\ UNCHANGED << stream, routing_table, headers, next_req_id, migration_procedure, migration_count, rescheduling_count >>
+            /\ UNCHANGED << stream, registry, headers, next_req_id, migration_procedure, migration_count, rescheduling_count >>
 
+Create_Canister(canister_id, subnet_id) ==
+    /\ canister_id \in DOMAIN registry[subnet[subnet_id].registry_version].routing_table
+    /\ canister_id \notin DOMAIN subnet[subnet_id].canister
+    /\ ~Subnet_Thinks_Its_Stopped(subnet_id)
+    /\ registry[subnet[subnet_id].registry_version].routing_table[canister_id].on = subnet_id
+    /\ subnet' = [ subnet EXCEPT ![subnet_id] = [ @ EXCEPT !.canister = canister_id :> Empty_Canister_State @@ @ ] ]
+    /\ UNCHANGED << stream, registry, headers, next_req_id, migration_procedure, migration_count, rescheduling_count >>
+
+\* @type: ($subnetId, $subnetId, $message) => Bool;
 Sender_Ok(subnet_id, sending_subnet_id, msg) ==
   LET 
-    table == routing_table[subnet[subnet_id].registry_version]
-    from_entry == table[msg.from]
-    mig_list == from_entry.migration_list
+    reg == registry[subnet[subnet_id].registry_version]
+    table == reg.routing_table
+    mig_list == Migration_List(table, msg.from)
   IN
-    \/ sending_subnet_id = from_entry.on
+    \/ Hosted(table, msg.from, sending_subnet_id)
     \/ \E i, j \in 1..Len(mig_list): 
         /\ mig_list[i] = sending_subnet_id  
-        /\ mig_list[j] = from_entry.on
+        /\ Hosted(table, msg.from, mig_list[j])
  
+ \* @type: ($subnetId, $message) => Bool;
 Recipient_Hosted(subnet_id, msg) ==
   LET 
-    table == routing_table[subnet[subnet_id].registry_version]
-    to_entry  == table[msg.to]
+    reg == registry[subnet[subnet_id].registry_version]
+    table == reg.routing_table
   IN 
-    /\ subnet_id = to_entry.on
-    /\ msg.to \in DOMAIN subnet[subnet_id].canister
+    /\ Hosted(table, msg.to, subnet_id)
 
+ \* @type: ($subnetId, $message) => Bool;
 Should_Reroute(subnet_id, msg) ==
   LET 
-    table == routing_table[subnet[subnet_id].registry_version]
-    to_entry == table[msg.to]
-    mig_list == to_entry.migration_list
+    reg == registry[subnet[subnet_id].registry_version]
+    table == reg.routing_table
+    mig_list == Migration_List(table, msg.to)
   IN 
     \E i, j \in 1..Len(mig_list): 
         /\ mig_list[i] = subnet_id
-        /\ mig_list[j] = to_entry.on
+        /\ Hosted(table, msg.to, mig_list[j])
 
 Ack(i) == [type |-> "ACK", index |-> i]
 Rej(i) == [type |-> "REJ", index |-> i]
+\* @type: $signal => Bool;
 Is_Ack(sig) == sig.type = "ACK"
+\* @type: $signal => Bool;
 Is_Rej(sig) == sig.type = "REJ"
 
 Response(from, to, id) == [type |-> "RESP", from |-> from, to |-> to, id |-> id]
 Request(from, to, id) == [type |-> "REQ", from |-> from, to |-> to, id |-> id]
+\* @type: $message => Bool;
 Is_Request(msg) == msg.type = "REQ"
+\* @type: $message => Bool;
 Is_Response(msg) == msg.type = "RESP"
 
 Add_Header(sending_subnet_id, receiving_subnet_id, header) ==
     headers' = [ headers EXCEPT ![<< sending_subnet_id, receiving_subnet_id >>] = Append(@, header) ]
 
+\* @type: ($subnetId -> $subnetState, $subnetId, $subnetId) => $subnetId -> $subnetState;
 Increment_Incoming(s, receiving_id, sender_id) ==
     [ s EXCEPT ![receiving_id] = [ @ EXCEPT 
             !.incoming_index = [ @ EXCEPT ![sender_id] = @ + 1 ]
         ]
     ]
 
+\* @type: ($subnetId -> $subnetState, $subnetId, $message) => $subnetId -> $subnetState;
 Queue_Message(s, subnet_id, msg) ==
     [ s EXCEPT ![subnet_id] =
             [ @ EXCEPT !.canister = [ @ EXCEPT ![msg.to] = [ @ EXCEPT !.queue = Append(@, [ message |-> msg, processed |-> FALSE ]) ]] ]
         ]
 
+\* @type: ($msgStreams, $subnetId, $subnetId, $message) => $msgStreams;
 Extend_Stream(s, sending_subnet_id, receiving_subnet_id, msg) ==
     [ s EXCEPT 
         ![<< sending_subnet_id, receiving_subnet_id >>] = 
@@ -347,6 +482,10 @@ Next_Stream_Message(sending_subnet_id, receiving_subnet_id) ==
 Is_Stopping(subnet_id, c) ==
     subnet[subnet_id].canister[c].state = STOPPING
 
+Is_Running(subnet_id, c) ==
+    /\ c \in DOMAIN subnet[subnet_id].canister
+    /\ subnet[subnet_id].canister[c].state = RUNNING
+
 \* "Spontaneous" event: try to induct a message from a remote outgoing stream
 \* In reality, we may induct several messages simultaneously. In the model, we
 \* always induct them one-by-one; this shouldn't have an effect on our properties.
@@ -357,15 +496,23 @@ Induct_Message(subnet_id, sending_subnet_id) ==
          msg == Next_Stream_Message(sending_subnet_id, subnet_id)
          s == subnet[subnet_id]
        IN
+        \* TODO: should we have a guard that prevents the sending subnet from
+        \* sending if it's halted? Can this have undesired consequences, as subnets
+        \* are distributed in practice? I.e., could a "halted" subnet might
+        /\ ~Subnet_Thinks_Its_Stopped(subnet_id)
         /\ Assert(Sender_Ok(subnet_id, sending_subnet_id, msg), 
-            "For subnet " \o subnet_id \o ", subnet " \o sending_subnet_id \o " wasn't OK for sending canister " \o msg.from)
+            \* TODO: get reasonable error messages with TLC while keeping Apalache happy
+            "Sender wasn't OK")
+            \* "For subnet " \o subnet_id \o ", subnet " \o sending_subnet_id \o " wasn't OK for sending canister " \o msg.from)
         /\ Assert(~Recipient_Hosted(subnet_id, msg) => Should_Reroute(subnet_id, msg),
-            "Recipient " \o msg.to \o " not hosted on " \o subnet_id \o " and message shouldn't be re-routed")
-        /\ CASE Recipient_Hosted(subnet_id, msg) /\ ~(Is_Request(msg) /\ Is_Stopping(subnet_id, msg.to)) ->
+            \* TODO: get reasonable error messages with TLC while keeping Apalache happy
+            "Recipient not hosted, but not re-routing the message")
+            \* "Recipient " \o msg.to \o " not hosted on " \o subnet_id \o " and message shouldn't be re-routed")
+        /\ CASE Recipient_Hosted(subnet_id, msg) /\ ~(Is_Request(msg) /\ ~Is_Running(subnet_id, msg.to)) ->
                     /\ Add_Header(subnet_id, sending_subnet_id, Ack(new_i))
                     /\ subnet' = Increment_Incoming(Queue_Message(subnet, subnet_id, msg), subnet_id, sending_subnet_id)
-                    /\ UNCHANGED << stream, routing_table, next_req_id, migration_procedure, migration_count, rescheduling_count >>
-             [] \/ Recipient_Hosted(subnet_id, msg) /\ Is_Request(msg) /\ Is_Stopping(subnet_id, msg.to)
+                    /\ UNCHANGED << stream, registry, next_req_id, migration_procedure, migration_count, rescheduling_count >>
+             [] \/ Recipient_Hosted(subnet_id, msg) /\ Is_Request(msg) /\ ~Is_Running(subnet_id, msg.to)
                 \/ ~Recipient_Hosted(subnet_id, msg) /\ Is_Request(msg) ->
                     /\ Add_Header(subnet_id, sending_subnet_id, Ack(new_i))
                     \* Send a reject response; we don't differentiate between "regular" and reject responses in the model
@@ -375,15 +522,18 @@ Induct_Message(subnet_id, sending_subnet_id) ==
                               sending_subnet_id, 
                               Response(msg.to, msg.from, msg.id))
                     /\ subnet' = Increment_Incoming(subnet, subnet_id, sending_subnet_id)
-                    /\ UNCHANGED << routing_table, next_req_id, migration_procedure, migration_count, rescheduling_count >>
+                    /\ UNCHANGED << registry, next_req_id, migration_procedure, migration_count, rescheduling_count >>
             [] ~Recipient_Hosted(subnet_id, msg) /\ Is_Response(msg)  ->
                     /\ Add_Header(subnet_id, sending_subnet_id, Rej(new_i))
                     /\ subnet' = Increment_Incoming(subnet, subnet_id, sending_subnet_id)
-                    /\ UNCHANGED << stream, routing_table, next_req_id, migration_procedure, migration_count, rescheduling_count >>
+                    /\ UNCHANGED << stream, registry, next_req_id, migration_procedure, migration_count, rescheduling_count >>
             \* This is just a sanity check to ensure that the assertions keep the preceding cases exhaustive
             \* This ensures that the model will complain if the event is disabled even though unconsumed messages exist
             [] OTHER ->
-               Assert(FALSE, "The preceding cases should be exhaustive for message to " \o msg.to \o " and subnet" \o subnet_id)
+               Assert(FALSE, 
+                \* TODO: get reasonable error messages with TLC while keeping Apalache happy
+                "The preceding cases should be exhaustive for messages")
+                \* "The preceding cases should be exhaustive for message to " \o msg.to \o " and subnet" \o subnet_id)
 
 
 Unconsumed_Signals_Exist(sending_subnet_id, receiving_subnet_id) ==
@@ -392,8 +542,10 @@ Unconsumed_Signals_Exist(sending_subnet_id, receiving_subnet_id) ==
 Next_Signal(sending_subnet_id, receiving_subnet_id) ==
   Head(headers[<<sending_subnet_id, receiving_subnet_id>>])
 
+\* @type: ($hdrStreams, $subnetId, $subnetId) => $hdrStreams;
 Consume_One(h, subnet_id, remote_subnet_id) == [ h EXCEPT ![<<remote_subnet_id, subnet_id>>] = Tail(@) ]
 
+\* @type: ($subnetId -> $subnetState, $subnetId, $subnetId) => $subnetId -> $subnetState;
 Increment_Outgoing(s, subnet_id, remote_subnet_id) ==
     [ s EXCEPT ![subnet_id] = [ @ EXCEPT 
             !.outgoing_index = [ @ EXCEPT ![remote_subnet_id] = @ + 1 ]
@@ -408,33 +560,34 @@ Induct_Signal(subnet_id, sending_subnet_id) ==
     /\ LET
         sig == Next_Signal(sending_subnet_id, subnet_id)
         msg == stream[<< subnet_id, sending_subnet_id >>][sig.index]
-        recipient_current_subnet == routing_table[subnet[subnet_id].registry_version][msg.to].on
+        recipient_current_subnet == Hosting_Subnet(registry[subnet[subnet_id].registry_version].routing_table, msg.to)
        IN
         CASE Is_Ack(sig) -> 
             /\ headers' = Consume_One(headers, subnet_id, sending_subnet_id)
             /\ subnet' = Increment_Outgoing(subnet, subnet_id, sending_subnet_id)
-            /\ UNCHANGED << stream, routing_table, next_req_id, migration_procedure, migration_count, rescheduling_count >>
+            /\ UNCHANGED << stream, registry, next_req_id, migration_procedure, migration_count, rescheduling_count >>
           [] Is_Rej(sig) /\ Is_Response(msg) ->
             /\ 
                 \* To bound the state space, we introduce two cases when we reschedule a message
                 \/ 
                     \* Case one: reschedule at most MAX_RESCHEDULING times, even if the subnet is behind
                     \* the latest version of the registry
-                    /\ subnet[subnet_id].registry_version < Len(routing_table)
+                    /\ subnet[subnet_id].registry_version < Len(registry)
                     /\ rescheduling_count[subnet_id] < MAX_RESCHEDULINGS
                     /\ rescheduling_count' = [ rescheduling_count EXCEPT ![subnet_id] = @ + 1 ]
                 \/
                     \* Case two: can always reschedule if the subnet is on the latest registry version
-                    /\ subnet[subnet_id].registry_version = Len(routing_table)
+                    /\ subnet[subnet_id].registry_version = Len(registry)
                     /\ UNCHANGED rescheduling_count
             /\ headers' = Consume_One(headers, subnet_id, sending_subnet_id)
             /\ subnet' = Increment_Outgoing(subnet, subnet_id, sending_subnet_id)
             /\ stream' = Extend_Stream(stream, subnet_id, recipient_current_subnet, msg)
-            /\ UNCHANGED << routing_table, next_req_id, migration_procedure, migration_count >>
+            /\ UNCHANGED << registry, next_req_id, migration_procedure, migration_count >>
           [] Is_Rej(sig) /\ Is_Request(msg) ->
             /\ Assert(FALSE, "Got a reject signal for a request")
           [] OTHER -> Assert(FALSE, "The previous cases should be exhaustive")
 
+\* @type: ($subnetId -> $subnetState, $subnetId, $canisterId, Int => Int) => $subnetId -> $subnetState;
 Update_Pending(s, subnet_id, canister_id, upd_f(_)) ==
     [ s EXCEPT ![subnet_id] = 
         [ @ EXCEPT !.canister = [ @ EXCEPT ![canister_id] = [ @ EXCEPT !.pending = upd_f(@) ]]]
@@ -444,19 +597,18 @@ Update_Pending(s, subnet_id, canister_id, upd_f(_)) ==
 Send_Request(sending_subnet_id, receiving_subnet_id, from, to) ==
   LET
     sending == subnet[sending_subnet_id]
-    rt == routing_table[sending.registry_version]
+    reg == registry[sending.registry_version]
+    rt == reg.routing_table
   IN
     \* Build this directly into the model, as TLC CONSTRAINT clause has weird
     \* semantics: the states violating the clause are still considered, but their successors
     \* are not. So with CONSTRAINT we would issue one request than MAX_REQUESTS, but never get a response 
     \* (as we wouldn't consider the successor state)
     /\ next_req_id <= MAX_REQUESTS
-    /\ rt[from].on = sending_subnet_id
-    /\ rt[to].on = receiving_subnet_id
-    /\ from \in DOMAIN sending.canister
-    \* Note: we disallow putting requests from starting canisters into the streams. This models
-    \* the implementation's local reject responses for messages in the canister's outgoing queue.
-    /\ sending.canister[from].state = RUNNING
+    /\ Hosted(rt, from, sending_subnet_id)
+    /\ Hosted(rt, to, receiving_subnet_id)
+    /\ ~Subnet_Thinks_Its_Stopped(sending_subnet_id)
+    /\ Is_Running(sending_subnet_id, from)
     \* Even if the receiving and sending subnets are the same, we route the message through
     \* message routing. In practice, the execution environment might shortcircuit this and
     \* deliver the message directly to the queue, but in some cases the message will actually
@@ -465,14 +617,16 @@ Send_Request(sending_subnet_id, receiving_subnet_id, from, to) ==
     /\ stream' = Extend_Stream(stream, sending_subnet_id, receiving_subnet_id, Request(from, to, next_req_id))
     /\ subnet' = Update_Pending(subnet, sending_subnet_id, from, LAMBDA p: p + 1)
     /\ next_req_id' = next_req_id + 1
-    /\ UNCHANGED << routing_table, headers, migration_procedure, migration_count, rescheduling_count >>
+    /\ UNCHANGED << registry, headers, migration_procedure, migration_count, rescheduling_count >>
 
 \* Map a function over a sequence
-Map_Seq(s, f(_)) == [i \in 1 .. Len(s) |-> f(s[i])]
+\* @type: (Seq(a), a => b) => Seq(b);
+Map_Seq(s, f(_)) == MkSeq(Len(s), LAMBDA i: f(s[i]))
 
 \* Logically remove a message from a queue. If the same message got delivered twice, this would 
 \* mark both instances of the message as processed simultaneously. However, our properties should
 \* ensure that this doesn't happen.
+\* @type: ($subnets, $subnetId, $canisterId, $message) => $subnets;
 Remove_Message(s, subnet_id, canister_id, msg) == [ s EXCEPT ![subnet_id] = 
     [ @ EXCEPT !.canister = [ @ EXCEPT ![canister_id] =
             [ @ EXCEPT !.queue = 
@@ -485,11 +639,15 @@ Remove_Message(s, subnet_id, canister_id, msg) == [ s EXCEPT ![subnet_id] =
 
 \* As we never remove messages from the queues in our model, use the following operator to
 \* access the "live" (i.e., unprocessed) queue messages.
-Live_Queue_Messages(q) == { live.message : 
-    live \in { m \in To_Set(q): m.processed = FALSE } }
+\* @type: Seq({message: $message, processed: Bool}) => Set($message);
+Live_Queue_Messages(q) == { live.message : live \in { m \in To_Set(q): m.processed = FALSE } }
+
+\* @type: {message: $message, processed: Bool} => $message;
+Get_Message(queue_msg) == queue_msg.message
 
 \* All the messages ever received in a queue (in the order they were received in)
-Queue_History(q) == Map_Seq(q, LAMBDA m: m.message)
+\* @type: Seq({message: $message, processed: Bool}) => Seq($message);
+Queue_History(q) == Map_Seq(q, Get_Message)
 
 \* "Spontaneous" event: a canister responds to a request in its input queue.
 \* TODO: here, we can send a response any time for any message in the queue, ignoring the order.
@@ -501,13 +659,13 @@ Queue_History(q) == Map_Seq(q, LAMBDA m: m.message)
 Send_Response(sending_subnet_id, receiving_subnet_id, from, to) ==
   LET
     sending == subnet[sending_subnet_id]
-    rt == routing_table[sending.registry_version]
+    rt == registry[sending.registry_version].routing_table
   IN
     /\ from \in DOMAIN sending.canister
+    /\ Hosted(rt, to, receiving_subnet_id)
     /\ \E msg \in Live_Queue_Messages(sending.canister[from].queue):
         /\ to = msg.from
         /\ Is_Request(msg)
-        /\ receiving_subnet_id = rt[to].on
         \* Even if the receiving and sending subnets are the same, we route the message through
         \* message routing. In practice, the execution environment might shortcircuit this and
         \* deliver the message directly to the queue, but in some cases the message will actually
@@ -515,7 +673,7 @@ Send_Response(sending_subnet_id, receiving_subnet_id, from, to) ==
         \* here, we only look at the case where the message goes through message routing.
         /\ stream' = Extend_Stream(stream, sending_subnet_id, receiving_subnet_id, Response(from, to, msg.id))
         /\ subnet' = Remove_Message(subnet, sending_subnet_id, from, msg)
-        /\ UNCHANGED << routing_table, headers, next_req_id, migration_procedure, migration_count, rescheduling_count >>
+        /\ UNCHANGED << registry, headers, next_req_id, migration_procedure, migration_count, rescheduling_count >>
 
 \* "Spontaneous" event: a canister processes a response from its queue.
 \* TODO: we allow responses to be processed in any order, i.e., we disregard the order imposed by the queue.
@@ -527,83 +685,144 @@ Process_Response(subnet_id, c) ==
     /\ \E msg \in Live_Queue_Messages(s.canister[c].queue):
         /\ Is_Response(msg)
         /\ subnet' = Update_Pending(Remove_Message(subnet, subnet_id, c, msg), subnet_id, c, LAMBDA p: p - 1)
-        /\ UNCHANGED << routing_table, stream, headers, next_req_id, migration_procedure, migration_count, rescheduling_count >>
+        /\ UNCHANGED << registry, stream, headers, next_req_id, migration_procedure, migration_count, rescheduling_count >>
 
-\* "Operator" event: start migrating a canister
-Start_Migrating_Canister(c, from_subnet_id, to_subnet_id) == 
+\* "Operator" event: start migrating multiple canisters between subnets
+Start_Migrating_Canisters(cs, from_subnet_id, to_subnet_id) == 
     /\ migration_count < MAX_MIGRATIONS
-    /\ c \notin DOMAIN migration_procedure
-    /\ from_subnet_id = Current_Table[c].on
-    /\ to_subnet_id # Current_Table[c].on
-    /\ routing_table' = Append(routing_table, 
-        c :> [on |-> Current_Table[c].on, migration_list |-> Current_Table[c].migration_list \o << from_subnet_id, to_subnet_id >> ]
-            @@ Current_Table
-       )
-    /\ migration_procedure' = c :> [state |-> MIG_STARTED, registry_version |-> (Len(routing_table) + 1) ] @@ migration_procedure
-    /\ UNCHANGED << headers, stream, subnet, next_req_id, migration_count, rescheduling_count >>
+    /\ \A migration_set \in DOMAIN migration_procedure: migration_set \intersect cs = {}
+    \* Sanity checks on the migration procedure
+    /\ Assert(
+        subnet[to_subnet_id] = Empty_Subnet_State({}),
+        "The new migration subnet doesn't have empty state"
+      )
+    /\ Assert(Current_Subnet_Info[to_subnet_id].is_halted, "The new migration subnet isn't halted")
+    \* Disabled to cover the case of non-empty canister range on the subnet startup
+    \* /\ Assert(
+    \*     \A s \in SUBNET_ID: 
+    \*         stream[<<s, to_subnet_id>>] = <<>> /\ stream[<<to_subnet_id, s>>] = <<>>,
+    \*     "There are messages in some stream from/to the new migration subnet"
+    \*   )
+    /\ Assert(
+        \A s \in SUBNET_ID: 
+            headers[<<s, to_subnet_id>>] = <<>> /\ headers[<<to_subnet_id, s>>] = <<>>,
+        "There are signals in some header stream from/to the new migration subnet"
+      )
+    /\ Assert(
+        \A c \in cs: Hosted(Current_Table, c, from_subnet_id),
+        "Some canisters marked for migration are not hosted on the parent subnet"
+      )
+    /\ Assert(from_subnet_id # to_subnet_id, "Tried to migrate from/to the same subnet")
+    /\ Assert(cs # {}, "Tried to migrate an empty set of canisters")
+    /\ registry' = Append(registry, 
+        [ routing_table |-> [ c \in cs |-> [on |-> Current_Table[c].on, migration_list |-> Current_Table[c].migration_list \o << from_subnet_id, to_subnet_id >> ] ]
+            @@ Current_Table,
+        subnet_info |-> Current_Subnet_Info
+        ])
+    /\ migration_procedure' = cs :> MIG_STARTED(Len(registry')) @@ migration_procedure
+    /\ UNCHANGED << subnet, headers, stream, next_req_id, migration_count, rescheduling_count >>
 
-Set_Migration_State(mig_proc, c, state) ==
-    [ mig_proc EXCEPT ![c] = [ @ EXCEPT !.state = state ] ]
+\* @type: ($migrationProcedure, Set($canisterId), $migrationState) => $migrationProcedure;
+Set_Migration_State(mig_proc, cs, state) ==
+    [ mig_proc EXCEPT ![cs] = state ]
 
-
-Migration_Universally_Observed(c) ==
-    /\ \A s \in SUBNET_ID: subnet[s].registry_version >= migration_procedure[c].registry_version
-
-Copy_State(s, canister_id, from_subnet_id, to_subnet_id) ==
-    [ s EXCEPT ![to_subnet_id] = 
-        [ @ EXCEPT !.canister = 
-            canister_id :> s[from_subnet_id].canister[canister_id] @@ @
-        ] 
-       ]
+\* @type: ($subnets, Set($canisterId), $subnetId, $subnetId) => $subnets;
+Move_State(s, canister_ids, from_subnet_id, to_subnet_id) ==
+  IF from_subnet_id = to_subnet_id THEN s
+  ELSE
+    LET
+      from_canisters == s[from_subnet_id].canister
+    IN
+      [ s EXCEPT ![to_subnet_id] = [ @ EXCEPT !.canister =
+          [ canister_id \in canister_ids \intersect DOMAIN from_canisters
+              |-> from_canisters[canister_id] ] @@ @
+      ], ![from_subnet_id] = [ @ EXCEPT !.canister = Remove_Arguments(from_canisters, canister_ids)] ]
 
 Streams_Are_Empty(subnet_id) == \A s2 \in SUBNET_ID: 
     /\ stream[<<subnet_id, s2>>] = <<>>
     /\ stream[<<s2, subnet_id>>] = <<>>
 
 
-Note_Version_Of_Registry_Switch(mig_proc, c, version) == [ mig_proc EXCEPT ![c] =
-    [ registry_version_of_switch |-> version ] @@ @ ]
-
 \* "Operator event": this event models several steps of the migration procedure at once: stopping the parent subnet,
 \* fetching CUPs, changing the registry (adding the CUP and the routing table), and starting the
 \* parent/child subnets
 \* We look at a simplified version of subnet splitting, where only one canister is moved from
 \* its old subnet to a new subnet.
-Split_Subnet(canister_id) ==
-  /\ canister_id \in DOMAIN  migration_procedure
+Split_Subnet(canister_ids) ==
+  /\ canister_ids \in DOMAIN migration_procedure
+  /\ Is_Mig_Started(migration_procedure[canister_ids])
   /\
     LET
-        rt == routing_table[migration_procedure[canister_id].registry_version]
-        parent_subnet_id == rt[canister_id].migration_list[1]
-        child_subnet_id == rt[canister_id].migration_list[2]
+        start_version == Get_Start_Version(migration_procedure[canister_ids])
+        cr == registry[start_version]
+        rt == cr.routing_table
+        parent_subnet_id == Migration_List(rt, CHOOSE c \in canister_ids: TRUE)[1]
+        child_subnet_id == Migration_List(rt, CHOOSE c \in canister_ids: TRUE)[2]
     IN
-        /\ migration_procedure[canister_id].state = MIG_STARTED
-        /\ Migration_Universally_Observed(canister_id)
+        \* All subnets have observed the registry version where the migration started
+        /\ \A s \in SUBNET_ID: subnet[s].registry_version >= start_version
         \* To ensure that our model resembles subnet splitting, the child subnet 
-        /\ Assert(Streams_Are_Empty(child_subnet_id), 
-            "Tried to split subnets where child subnet has non-empty streams " \o child_subnet_id)
-        /\ routing_table' = Append(routing_table, canister_id :> [ 
+        /\ registry' = Append(registry, [
+            subnet_info |-> Current_Subnet_Info,
+            routing_table |-> 
+                [canister_id \in canister_ids |-> [ 
                     on |-> child_subnet_id, 
                     migration_list |-> Current_Table[canister_id].migration_list 
-                ] @@ Current_Table)
+                    ]
+                ] @@ Current_Table
+            ])
         \* We atomically copy the canister to the child subnet and apply the registry update
         \* to both parent and child subnets
         /\ subnet' = Apply_Registry_Update(
-                routing_table', 
-                Len(routing_table'), 
+                registry', 
+                Len(registry'), 
                 Apply_Registry_Update(
-                    routing_table', 
-                    Len(routing_table'), 
-                    Copy_State(subnet, canister_id, parent_subnet_id, child_subnet_id),
+                    registry', 
+                    Len(registry'), 
+                    Move_State(subnet, canister_ids, parent_subnet_id, child_subnet_id),
                     parent_subnet_id),
                 child_subnet_id
            )
         /\ migration_procedure' =
-            Note_Version_Of_Registry_Switch(
-                Set_Migration_State(migration_procedure, canister_id, MIG_SWITCHED), 
-                canister_id, 
-                Len(routing_table'))
+                Set_Migration_State(migration_procedure, canister_ids, 
+                    MIG_SWITCHED([ 
+                        switch_version |-> Len(registry'), 
+                        stream_index_for_unhalting |-> Has_Outgoing([ s2 \in SUBNET_ID |-> Len(stream[<<parent_subnet_id, s2>>])]),
+                        stream_index_for_migration_list |-> To_Parent([ s2 \in {} |-> 0 ])
+                    ])) 
         /\ UNCHANGED << headers, stream, next_req_id, migration_count, rescheduling_count >>
+
+
+Record_Incoming_Indices_With_New_Registry(canister_ids, parent_subnet_id, subnet_id) ==
+    /\ canister_ids \in DOMAIN migration_procedure
+    /\ Watching_Indices_To_Parent(migration_procedure[canister_ids])
+    /\
+      LET
+        switch_version == Get_Switched_Version(migration_procedure[canister_ids])
+        stream_index_to_parent == Get_Switched_Indices_To_Parent(migration_procedure[canister_ids])
+      IN
+        /\ subnet_id \notin DOMAIN stream_index_to_parent
+        /\ subnet[subnet_id].registry_version >= switch_version
+        /\ migration_procedure' = Set_Migration_State(migration_procedure, canister_ids, 
+            Set_Switched_Index_To_Parent(migration_procedure[canister_ids], subnet_id, Len(stream[<<subnet_id, parent_subnet_id>>]))
+           )
+    /\ UNCHANGED << registry, headers, stream, subnet, next_req_id, migration_count, rescheduling_count >>
+
+Record_Outgoing_Indices(canister_ids, parent_subnet_id) ==
+    /\ canister_ids \in DOMAIN migration_procedure
+    /\ Watching_Indices_To_Parent(migration_procedure[canister_ids])
+    /\
+      LET
+        switch_version == Get_Switched_Version(migration_procedure[canister_ids])
+        stream_index_to_parent == Get_Switched_Indices_To_Parent(migration_procedure[canister_ids])
+        outgoing_indices == [ sn2 \in SUBNET_ID |-> Len(stream[<< parent_subnet_id, sn2 >>])]
+      IN
+        /\ DOMAIN stream_index_to_parent = SUBNET_ID
+        /\ Assert(subnet[parent_subnet_id].registry_version >= switch_version, "Parent's registry not reflecting the split")
+        /\ migration_procedure' = Set_Migration_State(migration_procedure, canister_ids, 
+            Set_Migration_List_Index(migration_procedure[canister_ids], From_Parent(outgoing_indices))
+           )
+    /\ UNCHANGED << registry, headers, stream, subnet, next_req_id, migration_count, rescheduling_count >>
 
 \* "Live" (not garbage collected) part of the stream between two subnets
 Live_Stream(from, to) ==
@@ -613,51 +832,81 @@ Live_Stream(from, to) ==
     IN
         SubSeq(s, i + 1, Len(s))
 
-\* "Operator" event: start migrating a canister
-Finish_Migration(old_subnet_id, new_subnet_id, c) ==
-    /\ c \in DOMAIN migration_procedure
-    /\ migration_procedure[c].state = MIG_SWITCHED
-    /\ old_subnet_id = routing_table[migration_procedure[c].registry_version][c].on
-    /\ c \notin DOMAIN subnet[old_subnet_id].canister
-    /\ \A sn2 \in SUBNET_ID: 
-          ~(\E msg \in To_Set(Live_Stream(old_subnet_id, sn2)): 
-                /\ msg.from = c
-                /\ Is_Response(msg)
-          )
-    /\ \A sn2 \in SUBNET_ID:
-        /\ subnet[sn2].registry_version >= migration_procedure[c].registry_version_of_switch
-        /\ \A msg \in To_Set(Live_Stream(sn2, old_subnet_id)): msg.to # c
-    /\ subnet[new_subnet_id].canister[c].state = RUNNING
-    /\ migration_procedure' = Remove_Argument(migration_procedure, c)
-    /\ routing_table' = Append(routing_table, 
-           c :> [
-            on |-> Current_Table[c].on,
-            migration_list |-> << >>
-          ] @@ Current_Table
+\* @type: ($registries, $subnetId) => $registries;
+Unhalt_Subnet_In_Registry(reg, subnet_id) == Append(reg, 
+    [ Last(reg) EXCEPT !.subnet_info = subnet_id :> [ is_halted |-> FALSE] @@ @])
+
+Unhalt_Subnet(old_subnet_id, new_subnet_id, cs) ==
+    /\ cs \in DOMAIN migration_procedure
+    /\ Is_Mig_Switched(migration_procedure[cs])
+    /\ ~Done_Unhalting(migration_procedure[cs])
+    \* Sanity check
+    \* /\ Assert(\A c \in cs: 
+    \*     Hosted(registry[migration_procedure[cs].registry_version].routing_table, c, old_subnet_id),
+    \*     "Something went wrong with the migration procedure; the moved canisters are not on the parent subnet according to the migration procedure records"
+    \*   )
+    \* Sanity check
+    /\ Assert(\A c \in cs: c \notin DOMAIN subnet[old_subnet_id].canister, "Trying to unhalt migration, but old state still hanging on to the canister state")
+    /\
+      LET 
+        index_from_parent == Get_Unhalting_Indices(migration_procedure[cs])
+      IN
+        /\ \A to \in SUBNET_ID \ {new_subnet_id}:
+            /\ to \in DOMAIN index_from_parent
+            /\ subnet[old_subnet_id].outgoing_index[to] >= index_from_parent[to]
+    /\ migration_procedure' = Set_Migration_State(migration_procedure, cs, 
+            Set_Unhalting_Index(migration_procedure[cs], Unhalting_Done))
+    /\ registry' = Unhalt_Subnet_In_Registry(registry, new_subnet_id)
+    /\ UNCHANGED << headers, stream, next_req_id, migration_count, rescheduling_count, subnet >>
+
+Remove_From_Migration_List(old_subnet_id, new_subnet_id, cs) ==
+    /\ cs \in DOMAIN migration_procedure
+    /\ ~Done_Observing_Streams(migration_procedure[cs])
+    /\ Watching_Indices_From_Parent(migration_procedure[cs])
+    /\ 
+      LET
+        indices == Get_Switched_Indices_From_Parent(migration_procedure[cs])
+      IN
+        /\ DOMAIN indices = SUBNET_ID
+        /\ \A sn2 \in SUBNET_ID: subnet[old_subnet_id].outgoing_index[sn2] >= indices[sn2]
+    /\ migration_procedure' = Set_Migration_State(migration_procedure, cs, Set_Migration_List_Index(migration_procedure[cs], Removed_From_List))
+    /\ registry' = Append(registry, 
+        [
+            routing_table |-> [ c \in cs |-> [ on |-> Current_Table[c].on, migration_list |-> << >> ] ]
+                            @@ Current_Table,
+            subnet_info |->  Current_Subnet_Info
+
+        ]
        )
-    /\ migration_count' = migration_count + 1
     /\ UNCHANGED << stream, subnet, next_req_id, headers, rescheduling_count >>
 
+
+\* "Operator" event: start migrating a canister
+Finish_Migration(old_subnet_id, new_subnet_id, cs) ==
+    /\ cs \in DOMAIN migration_procedure
+    /\ Is_Mig_Switched(migration_procedure[cs])
+    /\ Done_Unhalting(migration_procedure[cs])
+    /\ Done_Observing_Streams(migration_procedure[cs])
+    /\ migration_procedure' = Remove_Argument(migration_procedure, cs)
+    /\ migration_count' = migration_count + 1
+    /\ UNCHANGED << stream, subnet, next_req_id, headers, rescheduling_count, registry >>
+
 \* All "operator" events
-Migration_Procedure(from_subnet_id, to_subnet_id, c) ==
-    \/ Start_Migrating_Canister(c, from_subnet_id, to_subnet_id)
-    \/ Split_Subnet(c)
-    \/ Finish_Migration(from_subnet_id, to_subnet_id, c)
+Migration_Procedure(from_subnet_id, to_subnet_id, cs) ==
+    \/ Start_Migrating_Canisters(cs, from_subnet_id, to_subnet_id)
+    \/ Split_Subnet(cs)
+    \/ \E subnet_id \in SUBNET_ID: Record_Incoming_Indices_With_New_Registry(cs, from_subnet_id, subnet_id)
+    \/ Record_Outgoing_Indices(cs, from_subnet_id)
+    \/ Remove_From_Migration_List(from_subnet_id, to_subnet_id, cs)
+    \/ Unhalt_Subnet(from_subnet_id, to_subnet_id, cs)
+    \/ Finish_Migration(from_subnet_id, to_subnet_id, cs)
 
 Init ==
     /\ stream = [ p \in SUBNET_ID \X SUBNET_ID |-> <<>> ]
-    /\ routing_table = << INIT_ROUTING_TABLE >>
+    /\ registry = << [ routing_table |-> INIT_ROUTING_TABLE, subnet_info |-> INIT_SUBNET_INFO ] >>
     /\ headers = [ p \in SUBNET_ID \X SUBNET_ID |-> <<>> ]
-    /\ subnet = [s \in SUBNET_ID |-> [
-                incoming_index |-> [ s2 \in SUBNET_ID |-> 0 ],
-                outgoing_index |-> [ s2 \in SUBNET_ID |-> 0 ],
-                registry_version |-> 1,
-                canister |-> [c \in All_Hosted(INIT_ROUTING_TABLE, s) |-> 
-                    [ state |-> RUNNING, queue |-> << >>, pending |-> 0] 
-                ]
-            ]
-        ]
-    /\ migration_procedure = [ x \in {} |-> {}]
+    /\ subnet = [s \in SUBNET_ID |-> Empty_Subnet_State(All_Hosted(INIT_ROUTING_TABLE, s) \intersect INITIAL_EXISTING) ]
+    /\ migration_procedure = SetAsFun({})
     /\ next_req_id = 1
     /\ migration_count = 0
     /\ rescheduling_count = [ s \in SUBNET_ID |-> 0 ]
@@ -676,8 +925,9 @@ Next == \E s1, s2 \in SUBNET_ID: \E c1, c2 \in CANISTER_ID:
     \/ Induct_Signal(s1, s2)    
     \/ Update_Local_Registry(s1)
     \/ Start_Canister(c1, s1)
-    \/ \E c \in DOMAIN(CANISTERS_TO_MIGRATE): 
-        Migration_Procedure(CANISTERS_TO_MIGRATE[c].from, CANISTERS_TO_MIGRATE[c].to, c)
+    \/ Create_Canister(c1, s1)
+    \/ \E cs \in DOMAIN(CANISTERS_TO_MIGRATE): 
+        Migration_Procedure(CANISTERS_TO_MIGRATE[cs].from, CANISTERS_TO_MIGRATE[cs].to, cs)
     \/ Idle
     \* \/ Update_Routing_Table
 
@@ -687,7 +937,7 @@ Inv_Requests_Capped ==
     next_req_id <= MAX_REQUESTS + 1
 
 Inv_Registry_Length_Capped ==
-    Len(routing_table) <= 4 * MAX_MIGRATIONS
+    Len(registry) <= 5 * MAX_MIGRATIONS
 
 Inv_Queues_Correct == \A c \in CANISTER_ID, s \in SUBNET_ID:
     c \in DOMAIN subnet[s].canister =>
@@ -725,10 +975,31 @@ Inv_At_Most_One_Response == \A s \in SUBNET_ID: \A c \in DOMAIN subnet[s].canist
 
 \* To guarantee delivery of responses, we need certain fairness conditions.
 \* Namely, we require that the events below are not postponed forever
-Response_Fairness_Condition == \A s1, s2 \in SUBNET_ID: \A c1, c2 \in CANISTER_ID:
-    /\ WF_vars(Send_Response(s1, s2, c1, c2))
-    /\ WF_vars(Induct_Message(s1, s2))
-
+Response_Fairness_Condition == 
+    /\ \A s \in SUBNET_ID: WF_vars(Update_Local_Registry(s))
+    /\ \A s1, s2 \in SUBNET_ID:
+        /\ WF_vars(Induct_Message(s1, s2))
+    /\ \A s1, s2 \in SUBNET_ID: \A c1, c2 \in CANISTER_ID:
+        /\ WF_vars(Send_Response(s1, s2, c1, c2))
+    /\ \A cs \in DOMAIN CANISTERS_TO_MIGRATE:
+        \* /\ \E subnet_id \in SUBNET_ID: Record_Incoming_Indices_With_New_Registry(cs, from_subnet_id, subnet_id)
+        \* /\ Record_Outgoing_Indices(cs, from_subnet_id)
+        /\ WF_vars(Start_Migrating_Canisters(cs, CANISTERS_TO_MIGRATE[cs].from, CANISTERS_TO_MIGRATE[cs].to))
+        /\ WF_vars(Split_Subnet(cs))
+        /\ WF_vars(Unhalt_Subnet(CANISTERS_TO_MIGRATE[cs].from, CANISTERS_TO_MIGRATE[cs].to, cs))
+        /\ \A s2 \in SUBNET_ID: 
+            \* Need to induct signals to the parent, such that we can unhalt
+            \* the child subnet
+            /\ WF_vars(Induct_Signal(CANISTERS_TO_MIGRATE[cs].from, s2))
+            \* Need to induct signals from the parent, such that we can reschedule
+            \* the responses on REJ signals
+            /\ WF_vars(Induct_Signal(s2, CANISTERS_TO_MIGRATE[cs].from))
+        (* /\ WF_vars(Migration_Procedure(
+                CANISTERS_TO_MIGRATE[cs].from,
+                CANISTERS_TO_MIGRATE[cs].to,
+                cs 
+            ))
+        *)
 Spec == Init /\ []([Next]_vars) /\ Response_Fairness_Condition
 
 \* The guaranteed response property uses the "leads to" operator: A ~> B means
