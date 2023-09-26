@@ -1,4 +1,4 @@
-A model of the decentralization sale canister and its interactions with the ICP and SNS ledgers.
+A model of the SNS swap canister and its interactions with the ICP and SNS ledgers.
 
 The model introduces several main simplifications in comparison with the code:
 
@@ -42,7 +42,7 @@ Useful cheat sheets:
 https://github.com/tlaplus/PlusCalCheatSheet
 https://mbt.informal.systems/docs/tla_basics_tutorials/tla+cheatsheet.html
 
----- MODULE Decentralization ----
+---- MODULE Swap ----
 EXTENDS TLC, Integers, Functions, FiniteSetsExt, Sequences, SequencesExt
 
 CONSTANT 
@@ -68,7 +68,7 @@ CONSTANT
     COMMITTED,
 
     \* Constants for the two special non-user principals.
-    SALE_PRINCIPAL,
+    SWAP_PRINCIPAL,
     GOVERNANCE_PRINCIPAL,
 
     \* Process IDs for PlusCal processes with multiple instances; the cardinality of the sets
@@ -91,9 +91,9 @@ CONSTANT
     PID_ABORT
 
 ASSUME 
-    /\ SALE_PRINCIPAL \notin USERS
+    /\ SWAP_PRINCIPAL \notin USERS
     /\ GOVERNANCE_PRINCIPAL \notin USERS
-    /\ SALE_PRINCIPAL # GOVERNANCE_PRINCIPAL
+    /\ SWAP_PRINCIPAL # GOVERNANCE_PRINCIPAL
 
 \* Auxiliary definitions for manipulating inter-canister messages. In our model, each process
 \* sends at most one message at a time, and blocks on the result, so we can effectively use the 
@@ -109,16 +109,16 @@ Caller(msg) == msg.caller
 Transfer_Msg(pid, from, to, amount) == [ caller |-> pid, type |-> "xfer", from |-> from, to |-> to, amount |-> amount]
 Is_Transfer_Msg(msg) == msg.type = "xfer"
 
-Escrow_Address(user) == << SALE_PRINCIPAL, user >>
+Escrow_Address(user) == << SWAP_PRINCIPAL, user >>
 
 \* We'll initialize the balance of all relevant addresses to 0, so we can model transfers as just
 \* function updates (as the values already exist).
 Transfer(ledger, from, to, amount) == [ ledger EXCEPT ![from] = @ - amount, ![to] = @ + amount]
 
-(* --algorithm Decentralization {
+(* --algorithm Swap {
 
 variables
-    \* Relevant state of the decentralization sale canister
+    \* Relevant state of the swap canister
     lifecycle = OPEN;
     buyers = [ x \in {} |-> {} ];
     neuron_recipes = <<>>;
@@ -157,8 +157,8 @@ macro sns_respond_to_swap(response) {
 \* We describe the ledger behavior using several processes:
 \* 1. one that spontaneously transfers users accounts into the escrow account
 \* 2. one that just gives out spontaneous errors, and 
-\* 3. one that actually handles requests by the decentralization sale canister.
-\* This split allows us to require fairness on processing decentralization sale canister requests.
+\* 3. one that actually handles requests by the swap canister.
+\* This split allows us to require fairness on processing swap canister requests.
 \* Moreover, refund properties only hold if the users eventually stop transferring money to the
 \* escrow accounts; the split also allows us to easily constrain such behavior.
 process (ICP_User_Transfer = PID_ICP_USER_TRANSFER) {
@@ -316,7 +316,7 @@ process (Finalize \in PIDS_FINALIZE)
         remaining_investors = <<>>;
         next_investor;
 {
-Finalize_Sale_Loop:
+Finalize_Swap_Loop:
     await(lifecycle = COMMITTED \/ lifecycle = ABORTED);
     \* We explicitly model the Rust iterator through the buyers map as remaining_buyers
     remaining_buyers := SetToSeq(DOMAIN buyers);
@@ -348,7 +348,7 @@ End_ICP_Sweep_Loop:
     \* Clean up the model state space a bit by setting next_buyer to the initial value.
     next_buyer := defaultInitValue;
     if(lifecycle # COMMITTED) {
-        goto Finalize_Sale_Loop;
+        goto Finalize_Swap_Loop;
     } else {
         remaining_investors := SetToSeq(DOMAIN neuron_recipes);
     };
@@ -374,10 +374,10 @@ SNS_Sweep_Loop:
         }
     };
 End_SNS_Sweep_Loop:
-    goto Finalize_Sale_Loop;
+    goto Finalize_Swap_Loop;
 }
 
-\* Model of the refund_icp call. We use the same loop approach as for sale finalization and refreshing
+\* Model of the refund_icp call. We use the same loop approach as for swap finalization and refreshing
 \* buyer tokens.
 process (Refund_Icp \in PIDS_REFUND_ICP) 
 \* We'd like to have the property "if a user keeps calling refund_icp, their escrow account eventually goes to 0".  
@@ -412,7 +412,7 @@ Refund_Await_Response:
 }
 *)
 
-\* BEGIN TRANSLATION (chksum(pcal) = "dc6049a8" /\ chksum(tla) = "3bf1d413")
+\* BEGIN TRANSLATION (chksum(pcal) = "e9864ef9" /\ chksum(tla) = "45e643e")
 \* Label Commit of process Commit at line 242 col 5 changed to Commit_
 \* Label Abort of process Abort at line 256 col 5 changed to Abort_
 CONSTANT defaultInitValue
@@ -457,7 +457,7 @@ Init == (* Global variables *)
                                         [] self = PID_COMMIT -> "Commit_"
                                         [] self = PID_ABORT -> "Abort_"
                                         [] self \in PIDS_REFRESH_BUYER_TOKEN -> "Refresh_Loop"
-                                        [] self \in PIDS_FINALIZE -> "Finalize_Sale_Loop"
+                                        [] self \in PIDS_FINALIZE -> "Finalize_Swap_Loop"
                                         [] self \in PIDS_REFUND_ICP -> "Refund_Icp_Loop"]
 
 ICP_User_Transfer_Loop == /\ pc[PID_ICP_USER_TRANSFER] = "ICP_User_Transfer_Loop"
@@ -618,7 +618,7 @@ Refresh_Await_Ledger_Answer(self) == /\ pc[self] = "Refresh_Await_Ledger_Answer"
 Refresh_Buyer_Token(self) == Refresh_Loop(self)
                                 \/ Refresh_Await_Ledger_Answer(self)
 
-Finalize_Sale_Loop(self) == /\ pc[self] = "Finalize_Sale_Loop"
+Finalize_Swap_Loop(self) == /\ pc[self] = "Finalize_Swap_Loop"
                             /\ (lifecycle = COMMITTED \/ lifecycle = ABORTED)
                             /\ remaining_buyers' = [remaining_buyers EXCEPT ![self] = SetToSeq(DOMAIN buyers)]
                             /\ pc' = [pc EXCEPT ![self] = "ICP_Sweep_Loop"]
@@ -676,7 +676,7 @@ ICP_Sweep_Receive_Answer(self) == /\ pc[self] = "ICP_Sweep_Receive_Answer"
 End_ICP_Sweep_Loop(self) == /\ pc[self] = "End_ICP_Sweep_Loop"
                             /\ next_buyer' = [next_buyer EXCEPT ![self] = defaultInitValue]
                             /\ IF lifecycle # COMMITTED
-                                  THEN /\ pc' = [pc EXCEPT ![self] = "Finalize_Sale_Loop"]
+                                  THEN /\ pc' = [pc EXCEPT ![self] = "Finalize_Swap_Loop"]
                                        /\ UNCHANGED remaining_investors
                                   ELSE /\ remaining_investors' = [remaining_investors EXCEPT ![self] = SetToSeq(DOMAIN neuron_recipes)]
                                        /\ pc' = [pc EXCEPT ![self] = "SNS_Sweep_Loop"]
@@ -729,7 +729,7 @@ SNS_Sweep_Receive_Answer(self) == /\ pc[self] = "SNS_Sweep_Receive_Answer"
                                                   next_investor, refund_args >>
 
 End_SNS_Sweep_Loop(self) == /\ pc[self] = "End_SNS_Sweep_Loop"
-                            /\ pc' = [pc EXCEPT ![self] = "Finalize_Sale_Loop"]
+                            /\ pc' = [pc EXCEPT ![self] = "Finalize_Swap_Loop"]
                             /\ UNCHANGED << lifecycle, buyers, neuron_recipes, 
                                             icp_balances, sns_balances, 
                                             swap_to_icp_ledger, 
@@ -740,7 +740,7 @@ End_SNS_Sweep_Loop(self) == /\ pc[self] = "End_SNS_Sweep_Loop"
                                             remaining_investors, next_investor, 
                                             refund_args >>
 
-Finalize(self) == Finalize_Sale_Loop(self) \/ ICP_Sweep_Loop(self)
+Finalize(self) == Finalize_Swap_Loop(self) \/ ICP_Sweep_Loop(self)
                      \/ ICP_Sweep_Receive_Answer(self)
                      \/ End_ICP_Sweep_Loop(self) \/ SNS_Sweep_Loop(self)
                      \/ SNS_Sweep_Receive_Answer(self)
@@ -856,7 +856,7 @@ Spec_Liveness ==
     /\ [][Next]_vars
     /\ Fairness
 
-\* This is the main property from the perspective of the initiators of the sale.
+\* This is the main property from the perspective of the initiators of the swap.
 ICP_Liveness_Commit == 
     \* First, entering the "COMMITTED" of lifecycle leads to the ICP and ledger
     \* balances eventually being in sync with the amounts in the buyers data structure.
