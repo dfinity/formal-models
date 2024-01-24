@@ -1,0 +1,132 @@
+Old VM                                                              New VM
+========================================================================================================================================
+
+Every VM has its own secret key amd_{xxx} to sign attestation
+reports and a certificate signed by amd_{root} binding the public
+key pk(amd_{xxx}) to the VM measurement (vm_{xxx}) and chip ID
+(chip_{xxx}).
+
+let cert_{old} = (vm_{old}, chip_{old}, pk(amd_{old}))              let cert_{new} = (vm_{new}, chip_{new}, pk(amd_{new}))
+let scert_{old} = (cert_{old}, sign(h(cert_{old}), amd_{root}))     let scert_{new} = (cert_{new}, sign(h(cert_{new}), amd_{root}))
+
+We characterize the VMs for the sake of correctness statements
+by their VM measurement (vm_{xxx}), chip ID (chip_{xxx}),
+and the public key of the AMD root key pk(amd_{root}) they possess
+(the protocol assumes that the public key of the AMD root key is
+the same for both VMs).
+The old VM is also characterized by its secret key sk_{old}
+and the blessed VM measurement vm_{new} of the new VM to which
+the old VM transfers its secret key sk_{old}.
+
+InitOldVM(vm_{old}, chip_{old}, pk(amd_{root}), sk_{old}, vm_{new}) InitNewVM(vm_{new}, chip_{new}, pk(amd_{root}))
+
+Initially, the two VMs sends their nonces back and forth.
+
+ <----------------------------------------------------------------- (n_{new})
+
+(n_{new}, n_{old}) ----------------------------------------------->
+
+                                                                    Now the new VM generates a fresh secret key sk_{new}
+                                                                    whose public key pk(sk_{new}) it sends to the old VM
+                                                                    in a payload (payload_{new}) which also contains
+                                                                    the two nonces. Additionally, the new VM attaches
+                                                                    an attestation report---a signature of the payload's hash
+                                                                    by its key amd_{new} and a certificate scert_{new}
+                                                                    signed by the AMD root key.
+
+                                                                    let payload_{new} = (n_{new}, n_{old}, pk(sk_{new}))
+                                                                    let sig_payload_{new} = sign(h(payload_{new}), amd_{new})
+ <----------------------------------------------------------------- (payload_{new}, sig_payload_{new}, scert_{new})
+
+The old VM decomposes the received message:
+
+let (n_{new}, n_{old}, pk_{new}) = payload_{new}
+let (cert_{new}, sig_cert_{new}) = scert_{new}
+let (vm_{new}, chip_{new}, pk_amd_{new}) = cert_{new}
+
+verifies the attestation report:
+
+verify(sig_payload_{new}, h(payload_{new}), pk_amd_{new})
+verify(sig_cert_{new}, h(cert_{new}), pk(amd_{root}))
+
+checks that the new VM's measurement is the blessed one:
+
+assert(vm_{new} == vm_{blessed})
+
+and that the new VM is on the same physical host as the old VM:
+
+assert(chip_{new} == chip_{old})
+
+If all these checks pass, the old VM encrypts its secret key
+sk_{old} by the received public key pk_{new} of the new VM
+and sends this encryption together with the two nonces
+and a string literal 'SECRET' disambiguating this payload
+of the old VM (payload_{old}) from the received payload
+of the new VM (payload_{new}). Additionally, the old VM attaches
+an attestation report---a signature of the payload's hash
+by its key amd_{old} and a certificate scert_{old}
+signed by the AMD root key.
+
+let enc_{sk} = aenc(sk_{old}, pk_{new})
+let payload_{old} = (n_{new}, n_{old}, 'SECRET', enc_{sk})
+let sig_payload_{old} = sign(h(payload_{old}), amd_{old})
+(payload_{old}, sig_payload_{old}, scert_{old}) ------------------>
+
+                                                                    The new VM decomposes the received message:
+
+                                                                    let (n_{new}, n_{old}, 'SECRET', enc_{sk}) = payload_{old}
+                                                                    let (cert_{old}, sig_cert_{old}) = scert_{old}
+                                                                    let (vm_{old}, chip_{old}, pk_amd_{old}) = cert_{old}
+
+                                                                    verifies the attestation report:
+
+                                                                    verify(sig_payload_{old}, h(payload_{old}), pk_amd_{old})
+                                                                    verify(sig_cert_{old}, h(cert_{old}), pk(amd_{root}))
+
+                                                                    and checks that the old VM is on the same physical host
+                                                                    as the new VM:
+
+                                                                    assert(chip_{old} == chip_{new})
+
+                                                                    If all these checks pass, the new VM decrypts the received encrypted
+                                                                    secret key of the old VM (enc_{sk}) with the new VM's secret key
+                                                                    sk_{new}.
+
+                                                                    let dec_{sk} = adec(enc_{sk}, sk_{new})
+
+                                                                    This concludes the protocol which is characterized by a predicate
+                                                                    containing the new VM measurement (vm_{new}), its chip ID
+                                                                    (chip_{new}), the public key of the AMD root key pk(amd_{root}),
+                                                                    and the decrypted secret key of the old VM (dec_{sk}).
+
+                                                                    NewVMReceivedSecret(vm_{new}, chip_{new}, pk(amd_{root}), dec_{sk})
+
+========================================================================================================================================
+
+The following lemma asserts that a successful execution of the protocol is possible
+(and thus the above definitions are not internally inconsistent).
+
+lemma successful_run: exists-trace
+    "Ex vm_old vm_new chip pk_amd_root sk_old #i1 #i2 #j.
+        InitOldVM(<vm_old, chip>, pk_amd_root, sk_old, vm_new) @ i1
+      & InitNewVM(<vm_new, chip>, pk_amd_root) @ i2
+      & NewVMReceivedSecret(<vm_new, chip>, pk_amd_root, sk_old) @ j"
+
+The following lemma asserts that the secret key of the old VM
+does not leak to the adversary.
+
+lemma sk_old_secret:
+    "All vm_old vm_new chip_old pk_amd_root sk_old #i.
+        InitOldVM(<vm_old, chip_old>, pk_amd_root, sk_old, vm_new) @ i
+            ==> not (Ex #j. K(sk_old) @ j)"
+
+The following lemma asserts that a new VM successfully receiving a secret key
+is on the same physical host as an old VM with that same secret key and
+with the new VM configured as a blessed VM from the old VM's point of view.
+In other words, the protocol guarantees that the new VM is on the same physical
+host and runs a blessed VM to succesfully received the secret key of the old VM.
+
+lemma vm_chip_secret_agreement:
+    "All vm_new chip_new pk_amd_root dec_sk #j.
+        NewVMReceivedSecret(<vm_new, chip_new>, pk_amd_root, dec_sk) @j
+            ==> Ex vm_old #i. InitOldVM(<vm_old, chip_new>, pk_amd_root, dec_sk, vm_new) @ i"
