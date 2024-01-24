@@ -1,0 +1,115 @@
+theory sev_snp_replica_upgrade
+begin
+
+// BEGIN Rules
+
+builtins: asymmetric-encryption, hashing, signing
+
+rule AMDRootKey:
+    [ FR(~amd_root) ]
+    -->
+    [ !AMD(~amd_root), Out(pk(~amd_root)) ]
+
+rule InitOld:
+    let
+      cert_old = <$vm_old, $chip_old, pk(~amd_old)>
+      scert_old = <cert_old, sign(h(cert_old), amd_root)>
+    in
+    [ !AMD(amd_root), FR(~sk_old), FR(~amd_old) ]
+    --[ InitOldVM(<$vm_old, $chip_old>, pk(amd_root), ~sk_old, $vm_new) ]->
+    [ OldVM(<$vm_old, $chip_old>, 'INIT', <pk(amd_root), ~sk_old, $vm_new, ~amd_old, scert_old>) ]
+
+rule InitNew:
+    let
+      cert_new = <$vm_new, $chip_new, pk(~amd_new)>
+      scert_new = <cert_new, sign(h(cert_new), amd_root)>
+    in
+    [ !AMD(amd_root), FR(~amd_new) ]
+    --[ InitNewVM(<$vm_new, $chip_new>, pk(amd_root)) ]->
+    [ NewVM(<$vm_new, $chip_new>, 'INIT', <pk(amd_root), ~amd_new, scert_new>) ]
+
+rule NewVMSentNonce:
+    [ NewVM(<vm_new, chip_new>, 'INIT', <pk_amd_root, amd_new, scert_new>)
+    , FR(~n_new) ]-->
+    [ NewVM(<vm_new, chip_new>, 'SENT_NONCE', <pk_amd_root, amd_new, scert_new, ~n_new>)
+    , Out(~n_new) ]
+
+rule OldVMSentNonce:
+    [ OldVM(<vm_old, chip_old>, 'INIT', <pk_amd_root, sk_old, vm_blessed, amd_old, scert_old>)
+    , In(n_new)
+    , FR(~n_old) ]-->
+    [ OldVM(<vm_old, chip_old>, 'SENT_NONCE', <pk_amd_root, sk_old, vm_blessed, amd_old, scert_old, n_new, ~n_old>)
+    , Out(<n_new, ~n_old>) ]
+
+rule NewVMSentPubkey:
+    let
+      payload_new = <n_new, n_old, pk(~sk_new)>
+      sig_payload_new = sign(h(payload_new), amd_new)
+    in
+    [ NewVM(<vm_new, chip_new>, 'SENT_NONCE', <pk_amd_root, amd_new, scert_new, n_new>)
+    , In(<n_new, n_old>)
+    , FR(~sk_new) ]-->
+    [ NewVM(<vm_new, chip_new>, 'SENT_PUBKEY', <pk_amd_root, amd_new, scert_new, n_new, n_old, ~sk_new>)
+    , Out(<payload_new, sig_payload_new, scert_new>) ]
+
+rule OldVMSentSecret:
+    let
+      payload_new = <n_new, n_old, pk_new>
+      cert_new = <vm_new, chip_new, pk_amd_new>
+      enc_sk = aenc(sk_old, pk_new)
+      payload_old = <n_new, n_old, 'SECRET', enc_sk>
+      sig_payload_old = sign(h(payload_old), amd_old)
+    in
+    [ OldVM(<vm_old, chip_old>, 'SENT_NONCE', <pk_amd_root, sk_old, vm_blessed, amd_old, scert_old, n_new, n_old>)
+    , In(<<n_new, n_old, pk_new>, sig_payload_new, <<vm_new, chip_new, pk_amd_new>, sig_cert_new>>) ]
+    --[ Eq(verify(sig_payload_new, h(payload_new), pk_amd_new), true)
+      , Eq(verify(sig_cert_new, h(cert_new), pk_amd_root), true)
+      , Eq(vm_new, vm_blessed)
+      , Eq(chip_new, chip_old) ]->
+    [ OldVM(<vm_old, chip_old>, 'SENT_SECRET', <pk_amd_root, sk_old, vm_blessed, amd_old, scert_old, n_new, n_old>)
+    , Out(<payload_old, sig_payload_old, scert_old>) ]
+
+rule NewVMReceivedSecret:
+    let
+      payload_old = <n_new, n_old, 'SECRET', enc_sk>
+      cert_old = <vm_old, chip_old, pk_amd_old>
+      dec_sk = adec(enc_sk, sk_new)
+    in
+    [ NewVM(<vm_new, chip_new>, 'SENT_PUBKEY', <pk_amd_root, amd_new, scert_new, n_new, n_old, sk_new>)
+    , In(<<n_new, n_old, 'SECRET', enc_sk>, sig_payload_old, <<vm_old, chip_old, pk_amd_old>, sig_cert_old>>) ]
+    --[ Eq(verify(sig_payload_old, h(payload_old), pk_amd_old), true)
+      , Eq(verify(sig_cert_old, h(cert_old), pk_amd_root), true)
+      , Eq(chip_old, chip_new)
+      , NewVMReceivedSecret(<vm_new, chip_new>, pk_amd_root, dec_sk) ]->
+    [ NewVM(<vm_new, chip_new>, 'RECEIVED_SECRET', <pk_amd_root, amd_new, scert_new, n_new, n_old, sk_new, dec_sk>) ]
+
+// END Rules
+
+// BEGIN Statements
+
+lemma successful_run: exists-trace
+    "Ex vm_old vm_new chip pk_amd_root sk_old #i1 #i2 #j.
+        InitOldVM(<vm_old, chip>, pk_amd_root, sk_old, vm_new) @ i1
+      & InitNewVM(<vm_new, chip>, pk_amd_root) @ i2
+      & NewVMReceivedSecret(<vm_new, chip>, pk_amd_root, sk_old) @ j"
+
+lemma sk_old_secret:
+    "All vm_old vm_new chip_old pk_amd_root sk_old #i.
+        InitOldVM(<vm_old, chip_old>, pk_amd_root, sk_old, vm_new) @ i
+            ==> not (Ex #j. K(sk_old) @ j)"
+
+lemma vm_chip_secret_agreement:
+    "All vm_new chip_new pk_amd_root dec_sk #j.
+        NewVMReceivedSecret(<vm_new, chip_new>, pk_amd_root, dec_sk) @j
+            ==> Ex vm_old #i. InitOldVM(<vm_old, chip_new>, pk_amd_root, dec_sk, vm_new) @ i"
+
+// END Statements
+
+// BEGIN Axioms
+
+restriction Equality:
+    "All x y #i. Eq(x, y) @i ==> x = y"
+
+// END Axioms
+
+end
