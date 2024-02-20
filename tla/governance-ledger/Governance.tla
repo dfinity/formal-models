@@ -347,7 +347,6 @@ process ( Disburse_Neuron \in Disburse_Neuron_Process_Ids )
         \* The model the internal variables of the procedure.
         \* Since +Cal doesn't allow multiple assignments to the same variable in a single block,
         \* we also use temporary variables to simulate this and stay closer to the source code
-        rewards_amount = 0;
         fees_amount = 0;
         \* Whether an error was returned by a call to a ledger canister
         error = FALSE;
@@ -361,7 +360,6 @@ process ( Disburse_Neuron \in Disburse_Neuron_Process_Ids )
         with(nid \in DOMAIN(neuron) \ locks; amt \in 0..neuron[nid].cached_stake) {
             neuron_id := nid;
             amount := amt;
-            rewards_amount := neuron[neuron_id].maturity;
             fees_amount := neuron[neuron_id].fees;
             \* The Rust code has a more elaborate code path to determine the disburse_amount, where the
             \* amount argument is left unspecified in the call, and a default value is computed instead.
@@ -411,32 +409,13 @@ process ( Disburse_Neuron \in Disburse_Neuron_Process_Ids )
                 } else {
                     neuron := [neuron EXCEPT ![neuron_id] = [@ EXCEPT !.cached_stake = @ - to_deduct(calc_disburse_amount(amount, fees_amount))]];
                 };
-                if(rewards_amount > TRANSACTION_FEE) {
-                    send_request(self, OP_TRANSFER, transfer(Minting_Account_Id, to_account, rewards_amount, 0));
-                }
-                else {
-                    goto DisburseNeuronEnd;
-                };
             };
         };
 
-    DisburseNeuron4:
-        \* Only executed if the rewards amount is larger than the transaction fee
-        \* (due to the goto above)
-        with(answer \in { resp \in ledger_to_governance: resp.caller = self}) {
-                ledger_to_governance := ledger_to_governance \ {answer};
-                if(answer.response_value.status = TRANSFER_FAIL){
-                    goto DisburseNeuronEnd;
-                };
-        };
-    
     \* This label introduces an additional interleaving point not present in
     \* the Rust code, but it doesn't interfere with the soundness of our abstraction.
     \* Worst case, we'll get some spurious counterexamples.
     DisburseNeuronEnd:
-        if(~error) {
-            neuron := [neuron EXCEPT ![neuron_id] = [@ EXCEPT !.maturity = 0]];
-        };
         locks := locks \ {neuron_id};
     }
 
