@@ -486,7 +486,7 @@ process (Disburse_To_Neuron \in Disburse_To_Neuron_Process_Ids)
         \* 4. checks on the presence and shape of new controller
         with(nid \in DOMAIN(neuron) \ locks; 
                 parent_neuron = neuron[nid]; 
-                amt \in (MIN_STAKE + TRANSACTION_FEE)..(parent_neuron.cached_stake - MIN_STAKE);
+                amt \in (MIN_STAKE + TRANSACTION_FEE)..(parent_neuron.cached_stake - parent_neuron.fees - MIN_STAKE);
                 c_acc_id \in Governance_Account_Ids \ { neuron[n].account : n \in DOMAIN(neuron)};
             ) {
             parent_neuron_id := nid;
