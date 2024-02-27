@@ -659,7 +659,7 @@ process ( Merge_Neurons \in Merge_Neurons_Process_Ids )
                     - TRANSACTION_FEE)
                 \/ source_balance /= 0) {
                 \* This error path causes an exploitable violation of Cached_Stake_Capped_By_Balance_When_Not_Locked.
-                \* This error patch should be reachable by the following:
+                \* This error path should be reachable by the following:
                 \* - having nonzero fees on the target neuron
                 \* - sending tokens to the target or source neuron after MergeNeurons1 but before MergeNeruons2 or MergeNeurons3.
                 goto MergeNeurons5;
