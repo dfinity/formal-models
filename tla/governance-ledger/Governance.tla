@@ -603,6 +603,7 @@ process ( Merge_Neurons \in Merge_Neurons_Process_Ids )
         target_neuron_id = 0;
 
         \* internal variables
+        fees_amount = 0;
         target_balance = 0;
     {
     MergeNeurons1:
@@ -628,13 +629,42 @@ process ( Merge_Neurons \in Merge_Neurons_Process_Ids )
             await (neuron[source_neuron_id].cached_stake - neuron[source_neuron_id].fees) +
                 (neuron[target_neuron_id].cached_stake - neuron[target_neuron_id].fees) /= 0;
 
-            send_request(self, OP_TRANSFER,
-                    transfer(neuron[source_neuron_id].account,
-                        neuron[target_neuron_id].account,
-                        (neuron[source_neuron_id].cached_stake - neuron[source_neuron_id].fees) - TRANSACTION_FEE,
-                        TRANSACTION_FEE));
+            fees_amount := neuron[source_neuron_id].fees;
+            if(fees_amount > TRANSACTION_FEE) {
+                send_request(self, OP_TRANSFER, transfer(neuron[source_neuron_id].account, Minting_Account_Id, fees_amount, 0));
+            }
+            else {
+                \* There's some code duplication here, but having to have the with statement
+                \* span entire blocks to please Apalache, I don't have a better solution at the moment
+                update_fees(neuron_id, fees_amount);
+                send_request(self, OP_TRANSFER,
+                        transfer(neuron[source_neuron_id].account,
+                            neuron[target_neuron_id].account,
+                            (neuron[source_neuron_id].cached_stake - neuron[source_neuron_id].fees) - TRANSACTION_FEE,
+                            TRANSACTION_FEE));
+                goto MergeNeurons3;
+            };
         };
     MergeNeurons2:
+        \* Note that we're here only because the fees amount was larger than the
+        \* transaction fee (otherwise, the goto above would have taken us to MergeNeurons3)
+        with(answer \in { resp \in ledger_to_governance: resp.caller = self}) {
+            ledger_to_governance := ledger_to_governance \ {answer};
+            if(answer.response_value.status = TRANSFER_FAIL){
+                error := TRUE;
+                goto MergeNeurons6;
+            }
+            else {
+                update_fees(neuron_id, fees_amount);
+                send_request(self, OP_TRANSFER,
+                        transfer(neuron[source_neuron_id].account,
+                            neuron[target_neuron_id].account,
+                            (neuron[source_neuron_id].cached_stake - neuron[source_neuron_id].fees) - TRANSACTION_FEE,
+                            TRANSACTION_FEE));
+            };
+        };
+
+    MergeNeurons3:
         with(answer \in { resp \in ledger_to_governance: resp.caller = self}) {
             ledger_to_governance := ledger_to_governance \ {answer};
             if(answer.response_value.status = TRANSFER_FAIL) {
@@ -643,13 +673,13 @@ process ( Merge_Neurons \in Merge_Neurons_Process_Ids )
                 send_request(self, OP_QUERY_BALANCE, balance_query(neuron[target_neuron_id].account));
             };
         };
-    MergeNeurons3:
+    MergeNeurons4:
         with(r \in { r2 \in ledger_to_governance : r2.caller = self }; b = r.response_value.bal ) {
             ledger_to_governance := ledger_to_governance \ {r};
             target_balance := b;
             send_request(self, OP_QUERY_BALANCE, balance_query(neuron[source_neuron_id].account));
         };
-    MergeNeurons4:
+    MergeNeurons5:
         with(r \in { r2 \in ledger_to_governance : r2.caller = self }; source_balance = r.response_value.bal ) {
             ledger_to_governance := ledger_to_governance \ {r};
 
@@ -662,7 +692,7 @@ process ( Merge_Neurons \in Merge_Neurons_Process_Ids )
                 \* This error path should be reachable by the following:
                 \* - having nonzero fees on the target neuron
                 \* - sending tokens to the target or source neuron after MergeNeurons1 but before MergeNeruons2 or MergeNeurons3.
-                goto MergeNeurons5;
+                goto MergeNeurons6;
             } else {
                 \* There seems to be a bug in the impl that the source fees are not reset. User is at disadvantage since fees
                 \* will be double-counted.
@@ -673,7 +703,7 @@ process ( Merge_Neurons \in Merge_Neurons_Process_Ids )
                     ![source_neuron_id] = [@ EXCEPT !.cached_stake = 0, !.maturity = 0]];
             };
         };
-    MergeNeurons5:
+    MergeNeurons6:
         locks := locks \ {source_neuron_id, target_neuron_id};
     };
 
