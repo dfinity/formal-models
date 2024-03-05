@@ -627,7 +627,7 @@ process ( Merge_Neurons \in Merge_Neurons_Process_Ids )
             else {
                 \* There's some code duplication here, but having to have the with statement
                 \* span entire blocks to please Apalache, I don't have a better solution at the moment
-                update_fees(neuron_id, fees_amount);
+                update_fees(source_neuron_id, fees_amount);
                 send_request(self, OP_TRANSFER,
                         transfer(neuron[source_neuron_id].account,
                             neuron[target_neuron_id].account,
@@ -646,7 +646,7 @@ process ( Merge_Neurons \in Merge_Neurons_Process_Ids )
                 goto MergeNeurons6;
             }
             else {
-                update_fees(neuron_id, fees_amount);
+                update_fees(source_neuron_id, fees_amount);
                 send_request(self, OP_TRANSFER,
                         transfer(neuron[source_neuron_id].account,
                             neuron[target_neuron_id].account,
