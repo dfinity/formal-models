@@ -95,6 +95,7 @@ Apalache caveats to keep in mind:
 Optimizations
 *************
 
+\* TODO: this documentation should be updated to not refer to Merge_Maturity_Of_Neuron
 The model deviates from the Rust implementation by (among other things) employing some optimizations.
 In particular, validity checks (e.g., in Merge_Maturity_Of_Neuron) over method parameters are often 
 moved to the start of the action, such that the choice of the parameters is restricted immediately, 
@@ -117,8 +118,6 @@ CONSTANTS
     Spawn_Neuron_Process_Ids, 
     \* @type: Set(PROC);
     Disburse_To_Neuron_Process_Ids,
-    \* @type: Set(PROC);
-    Merge_Maturity_Of_Neuron_Process_Ids,
     \* @type: Set(PROC);
     Split_Neuron_Process_Ids,
     \* @type: Set(PROC);
@@ -519,30 +518,6 @@ process (Disburse_To_Neuron \in Disburse_To_Neuron_Process_Ids)
         };
  
     }
-process ( Merge_Maturity_Of_Neuron \in Merge_Maturity_Of_Neuron_Process_Ids )
-    variable
-        \* These model the parameters of the call
-        neuron_id = 0;
-        maturity_to_merge = 0;  \* it is given as a percentage in rust, but we simplify that here
-        \* Whether an error was returned by a call to a ledger canister
-    {
-    MergeMaturityOfNeuron1:
-        with(nid \in DOMAIN(neuron) \ locks; maturity_to_merge_tmp \in (TRANSACTION_FEE+1)..neuron[nid].maturity) {
-            neuron_id := nid;
-            maturity_to_merge := maturity_to_merge_tmp;
-            locks := locks \union {neuron_id};
-            send_request(self, OP_TRANSFER, transfer(Minting_Account_Id, neuron[neuron_id].account, maturity_to_merge, 0));
-        };
-    MergeMaturityOfNeuron2:
-        with(answer \in { resp \in ledger_to_governance: resp.caller = self}) {
-            ledger_to_governance := ledger_to_governance \ {answer};
-            if(answer.response_value.status # TRANSFER_FAIL) {
-                \* the rust impl uses saturating arithmetic and unsigned ints.
-                neuron := [neuron EXCEPT ![neuron_id] = [@ EXCEPT !.maturity = @ - maturity_to_merge, !.cached_stake = @ + maturity_to_merge]];
-            };
-            locks := locks \ {neuron_id};
-        };
-    };
 
 process ( Split_Neuron \in Split_Neuron_Process_Ids )
     variable
