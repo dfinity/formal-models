@@ -102,6 +102,22 @@ moved to the start of the action, such that the choice of the parameters is rest
 rather adding an "await" at the same point as where the implementation performs its checks.
 This shortens the time needed by TLC to figure out that an action is disabled in a particular state.
 
+
+***********
+Deviations
+***********
+
+As of Mar 2024, the model deviates from the Rust implementation in that the model does not have concept
+of staked_maturity and spawning state. In more detail:
+
+* The staked_maturity neuron attribute is missing.
+* The stake_maturity_of_neuron endpoint is not implemented.
+* Neuron spawning state is not tracked.
+* spawn_neuron in the model follows the old Rust implementation. The current Rust implementation creates
+  the child neuron and moves maturity to it, and then mints maturity later in the canister heartbeat.
+  It also handles locks differently.
+
+
 ------------ MODULE Governance ------------
 EXTENDS TLC, Sequences, Naturals, FiniteSets
 
