@@ -208,6 +208,7 @@ CONSTANTS
     TRANSFER_FAIL
 
 Min(x, y) == IF x < y THEN x ELSE y
+Max(x, y) == IF x < y THEN y ELSE x
 \* Wrappers to make creation of requests/responses a bit more convenient less error prone by giving names to parameters,
 \* instead of fiddling with indices or string field names directly.
 response(caller, response_val) == [caller |-> caller, response_value |-> response_val]
@@ -216,7 +217,7 @@ transfer(from, to, amount, fee) == [ from |-> from, to |-> to, amount |-> amount
 balance_query(account) == [ of_account |-> account ]
 
 calc_disburse_amount(amount, fees_amount) == LET
-        diff == amount - fees_amount
+        diff == Max(0, amount - fees_amount)
     IN
         IF diff > TRANSACTION_FEE THEN diff - TRANSACTION_FEE ELSE diff
 
