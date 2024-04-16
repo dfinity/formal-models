@@ -685,8 +685,6 @@ process ( Merge_Neurons \in Merge_Neurons_Process_Ids )
                 \* - sending tokens to the target or source neuron after MergeNeurons1 but before MergeNeruons2 or MergeNeurons3.
                 goto MergeNeurons6;
             } else {
-                \* There seems to be a bug in the impl that the source fees are not reset. User is at disadvantage since fees
-                \* will be double-counted.
                 neuron := [neuron EXCEPT
                     ![target_neuron_id] = [@ EXCEPT !.cached_stake = @ +
                         (neuron[source_neuron_id].cached_stake - neuron[source_neuron_id].fees) - TRANSACTION_FEE,
