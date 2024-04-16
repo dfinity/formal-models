@@ -659,7 +659,7 @@ process ( Merge_Neurons \in Merge_Neurons_Process_Ids )
         with(answer \in { resp \in ledger_to_governance: resp.caller = self}) {
             ledger_to_governance := ledger_to_governance \ {answer};
             if(answer.response_value.status = TRANSFER_FAIL) {
-                goto MergeNeurons5;
+                goto MergeNeurons6;
             } else {
                 send_request(self, OP_QUERY_BALANCE, balance_query(neuron[target_neuron_id].account));
             };
