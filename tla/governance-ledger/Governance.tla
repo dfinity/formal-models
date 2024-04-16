@@ -643,7 +643,6 @@ process ( Merge_Neurons \in Merge_Neurons_Process_Ids )
         with(answer \in { resp \in ledger_to_governance: resp.caller = self}) {
             ledger_to_governance := ledger_to_governance \ {answer};
             if(answer.response_value.status = TRANSFER_FAIL){
-                error := TRUE;
                 goto MergeNeurons6;
             }
             else {
