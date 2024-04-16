@@ -802,7 +802,7 @@ process (Increase_Neuron_Maturity \in Increase_Neuron_Maturity_Process_Ids)
 
 *)
 
-\* BEGIN TRANSLATION (chksum(pcal) = "636cdf81" /\ chksum(tla) = "6d75a8e7")
+\* BEGIN TRANSLATION (chksum(pcal) = "a8f9c45d" /\ chksum(tla) = "92226b68")
 \* Process variable account_id of process Claim_Neuron at line 294 col 9 changed to account_id_
 \* Process variable neuron_id of process Claim_Neuron at line 296 col 9 changed to neuron_id_
 \* Process variable neuron_id of process Refresh_Neuron at line 329 col 9 changed to neuron_id_R
@@ -1331,8 +1331,7 @@ MergeNeurons2(self) == /\ pc[self] = "MergeNeurons2"
                        /\ \E answer \in { resp \in ledger_to_governance: resp.caller = self}:
                             /\ ledger_to_governance' = ledger_to_governance \ {answer}
                             /\ IF answer.response_value.status = TRANSFER_FAIL
-                                  THEN /\ error' = [error EXCEPT ![self] = TRUE]
-                                       /\ pc' = [pc EXCEPT ![self] = "MergeNeurons6"]
+                                  THEN /\ pc' = [pc EXCEPT ![self] = "MergeNeurons6"]
                                        /\ UNCHANGED << neuron, 
                                                        governance_to_ledger >>
                                   ELSE /\ IF neuron[source_neuron_id[self]].cached_stake > fees_amount[self]
@@ -1343,27 +1342,26 @@ MergeNeurons2(self) == /\ pc[self] = "MergeNeurons2"
                                                                                                                                (neuron'[source_neuron_id[self]].cached_stake - neuron'[source_neuron_id[self]].fees) - TRANSACTION_FEE,
                                                                                                                                TRANSACTION_FEE))))
                                        /\ pc' = [pc EXCEPT ![self] = "MergeNeurons3"]
-                                       /\ error' = error
                        /\ UNCHANGED << neuron_id_by_account, locks, 
                                        neuron_count, total_rewards, minted, 
                                        burned, account_id_, neuron_id_, 
                                        account_id, neuron_id_R, neuron_id, 
                                        amount_, to_account, fees_amount_, 
-                                       parent_neuron_id_, child_neuron_id_, 
-                                       child_stake, child_account_id_, 
-                                       parent_neuron_id_D, disburse_amount, 
-                                       child_account_id_D, child_neuron_id_D, 
-                                       parent_neuron_id, amount, 
-                                       child_neuron_id, child_account_id, 
-                                       source_neuron_id, target_neuron_id, 
-                                       fees_amount, target_balance, balances, 
-                                       nr_transfers >>
+                                       error, parent_neuron_id_, 
+                                       child_neuron_id_, child_stake, 
+                                       child_account_id_, parent_neuron_id_D, 
+                                       disburse_amount, child_account_id_D, 
+                                       child_neuron_id_D, parent_neuron_id, 
+                                       amount, child_neuron_id, 
+                                       child_account_id, source_neuron_id, 
+                                       target_neuron_id, fees_amount, 
+                                       target_balance, balances, nr_transfers >>
 
 MergeNeurons3(self) == /\ pc[self] = "MergeNeurons3"
                        /\ \E answer \in { resp \in ledger_to_governance: resp.caller = self}:
                             /\ ledger_to_governance' = ledger_to_governance \ {answer}
                             /\ IF answer.response_value.status = TRANSFER_FAIL
-                                  THEN /\ pc' = [pc EXCEPT ![self] = "MergeNeurons5"]
+                                  THEN /\ pc' = [pc EXCEPT ![self] = "MergeNeurons6"]
                                        /\ UNCHANGED governance_to_ledger
                                   ELSE /\ governance_to_ledger' = Append(governance_to_ledger, request(self, OP_QUERY_BALANCE, (balance_query(neuron[target_neuron_id[self]].account))))
                                        /\ pc' = [pc EXCEPT ![self] = "MergeNeurons4"]
@@ -1468,7 +1466,7 @@ LedgerMainLoop == /\ pc[Ledger_Process_Id] = "LedgerMainLoop"
                                  LET caller == req.caller IN
                                    /\ governance_to_ledger' = Tail(governance_to_ledger)
                                    /\ Assert((t \in {OP_QUERY_BALANCE, OP_TRANSFER}), 
-                                             "Failure of assertion at line 725, column 21.")
+                                             "Failure of assertion at line 722, column 21.")
                                    /\ IF t = OP_QUERY_BALANCE
                                          THEN /\ ledger_to_governance' = (ledger_to_governance \union {response(caller, ([bal |-> balances[arg.of_account]]))})
                                               /\ UNCHANGED << minted, burned, 
@@ -1489,7 +1487,7 @@ LedgerMainLoop == /\ pc[Ledger_Process_Id] = "LedgerMainLoop"
                                                                                                \/ (to_acc = Minting_Account_Id /\ amnt < TRANSACTION_FEE)
                                                                                                \/ fee + amnt > balances[from_acc] IN
                                                                       /\ Assert((fee >= 0), 
-                                                                                "Failure of assertion at line 748, column 29.")
+                                                                                "Failure of assertion at line 745, column 29.")
                                                                       /\ IF is_invalid_transfer
                                                                             THEN /\ ledger_to_governance' = (ledger_to_governance \union {response(caller, ([status |-> TRANSFER_FAIL]))})
                                                                                  /\ UNCHANGED << minted, 
