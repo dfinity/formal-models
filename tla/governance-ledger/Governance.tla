@@ -116,6 +116,8 @@ of staked_maturity and spawning state. In more detail:
 * spawn_neuron in the model follows the old Rust implementation. The current Rust implementation creates
   the child neuron and moves maturity to it, and then mints maturity later in the canister heartbeat.
   It also handles locks differently.
+* merge_neurons in the model has an extra query after the transfer. It checks consistency with the ledger
+  balance. This does not happen in the Rust implementation.
 
 
 ------------ MODULE Governance ------------
