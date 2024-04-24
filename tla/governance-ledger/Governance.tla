@@ -95,11 +95,30 @@ Apalache caveats to keep in mind:
 Optimizations
 *************
 
+\* TODO: this documentation should be updated to not refer to Merge_Maturity_Of_Neuron
 The model deviates from the Rust implementation by (among other things) employing some optimizations.
 In particular, validity checks (e.g., in Merge_Maturity_Of_Neuron) over method parameters are often 
 moved to the start of the action, such that the choice of the parameters is restricted immediately, 
 rather adding an "await" at the same point as where the implementation performs its checks.
 This shortens the time needed by TLC to figure out that an action is disabled in a particular state.
+
+
+***********
+Deviations
+***********
+
+As of Mar 2024, the model deviates from the Rust implementation in that the model does not have concept
+of staked_maturity and spawning state. In more detail:
+
+* The staked_maturity neuron attribute is missing.
+* The stake_maturity_of_neuron endpoint is not implemented.
+* Neuron spawning state is not tracked.
+* spawn_neuron in the model follows the old Rust implementation. The current Rust implementation creates
+  the child neuron and moves maturity to it, and then mints maturity later in the canister heartbeat.
+  It also handles locks differently.
+* merge_neurons in the model has an extra query after the transfer. It checks consistency with the ledger
+  balance. This does not happen in the Rust implementation.
+
 
 ------------ MODULE Governance ------------
 EXTENDS TLC, Sequences, Naturals, FiniteSets
@@ -117,8 +136,6 @@ CONSTANTS
     Spawn_Neuron_Process_Ids, 
     \* @type: Set(PROC);
     Disburse_To_Neuron_Process_Ids,
-    \* @type: Set(PROC);
-    Merge_Maturity_Of_Neuron_Process_Ids,
     \* @type: Set(PROC);
     Split_Neuron_Process_Ids,
     \* @type: Set(PROC);
@@ -193,6 +210,7 @@ CONSTANTS
     TRANSFER_FAIL
 
 Min(x, y) == IF x < y THEN x ELSE y
+Max(x, y) == IF x < y THEN y ELSE x
 \* Wrappers to make creation of requests/responses a bit more convenient less error prone by giving names to parameters,
 \* instead of fiddling with indices or string field names directly.
 response(caller, response_val) == [caller |-> caller, response_value |-> response_val]
@@ -201,7 +219,7 @@ transfer(from, to, amount, fee) == [ from |-> from, to |-> to, amount |-> amount
 balance_query(account) == [ of_account |-> account ]
 
 calc_disburse_amount(amount, fees_amount) == LET
-        diff == amount - fees_amount
+        diff == Max(0, amount - fees_amount)
     IN
         IF diff > TRANSACTION_FEE THEN diff - TRANSACTION_FEE ELSE diff
 
@@ -347,7 +365,6 @@ process ( Disburse_Neuron \in Disburse_Neuron_Process_Ids )
         \* The model the internal variables of the procedure.
         \* Since +Cal doesn't allow multiple assignments to the same variable in a single block,
         \* we also use temporary variables to simulate this and stay closer to the source code
-        rewards_amount = 0;
         fees_amount = 0;
         \* Whether an error was returned by a call to a ledger canister
         error = FALSE;
@@ -361,7 +378,6 @@ process ( Disburse_Neuron \in Disburse_Neuron_Process_Ids )
         with(nid \in DOMAIN(neuron) \ locks; amt \in 0..neuron[nid].cached_stake) {
             neuron_id := nid;
             amount := amt;
-            rewards_amount := neuron[neuron_id].maturity;
             fees_amount := neuron[neuron_id].fees;
             \* The Rust code has a more elaborate code path to determine the disburse_amount, where the
             \* amount argument is left unspecified in the call, and a default value is computed instead.
@@ -411,32 +427,13 @@ process ( Disburse_Neuron \in Disburse_Neuron_Process_Ids )
                 } else {
                     neuron := [neuron EXCEPT ![neuron_id] = [@ EXCEPT !.cached_stake = @ - to_deduct(calc_disburse_amount(amount, fees_amount))]];
                 };
-                if(rewards_amount > TRANSACTION_FEE) {
-                    send_request(self, OP_TRANSFER, transfer(Minting_Account_Id, to_account, rewards_amount, 0));
-                }
-                else {
-                    goto DisburseNeuronEnd;
-                };
             };
         };
 
-    DisburseNeuron4:
-        \* Only executed if the rewards amount is larger than the transaction fee
-        \* (due to the goto above)
-        with(answer \in { resp \in ledger_to_governance: resp.caller = self}) {
-                ledger_to_governance := ledger_to_governance \ {answer};
-                if(answer.response_value.status = TRANSFER_FAIL){
-                    goto DisburseNeuronEnd;
-                };
-        };
-    
     \* This label introduces an additional interleaving point not present in
     \* the Rust code, but it doesn't interfere with the soundness of our abstraction.
     \* Worst case, we'll get some spurious counterexamples.
     DisburseNeuronEnd:
-        if(~error) {
-            neuron := [neuron EXCEPT ![neuron_id] = [@ EXCEPT !.maturity = 0]];
-        };
         locks := locks \ {neuron_id};
     }
 
@@ -507,7 +504,7 @@ process (Disburse_To_Neuron \in Disburse_To_Neuron_Process_Ids)
         \* 4. checks on the presence and shape of new controller
         with(nid \in DOMAIN(neuron) \ locks; 
                 parent_neuron = neuron[nid]; 
-                amt \in (MIN_STAKE + TRANSACTION_FEE)..(parent_neuron.cached_stake - MIN_STAKE);
+                amt \in (MIN_STAKE + TRANSACTION_FEE)..(parent_neuron.cached_stake - parent_neuron.fees - MIN_STAKE);
                 c_acc_id \in Governance_Account_Ids \ { neuron[n].account : n \in DOMAIN(neuron)};
             ) {
             parent_neuron_id := nid;
@@ -540,30 +537,6 @@ process (Disburse_To_Neuron \in Disburse_To_Neuron_Process_Ids)
         };
  
     }
-process ( Merge_Maturity_Of_Neuron \in Merge_Maturity_Of_Neuron_Process_Ids )
-    variable
-        \* These model the parameters of the call
-        neuron_id = 0;
-        maturity_to_merge = 0;  \* it is given as a percentage in rust, but we simplify that here
-        \* Whether an error was returned by a call to a ledger canister
-    {
-    MergeMaturityOfNeuron1:
-        with(nid \in DOMAIN(neuron) \ locks; maturity_to_merge_tmp \in (TRANSACTION_FEE+1)..neuron[nid].maturity) {
-            neuron_id := nid;
-            maturity_to_merge := maturity_to_merge_tmp;
-            locks := locks \union {neuron_id};
-            send_request(self, OP_TRANSFER, transfer(Minting_Account_Id, neuron[neuron_id].account, maturity_to_merge, 0));
-        };
-    MergeMaturityOfNeuron2:
-        with(answer \in { resp \in ledger_to_governance: resp.caller = self}) {
-            ledger_to_governance := ledger_to_governance \ {answer};
-            if(answer.response_value.status # TRANSFER_FAIL) {
-                \* the rust impl uses saturating arithmetic and unsigned ints.
-                neuron := [neuron EXCEPT ![neuron_id] = [@ EXCEPT !.maturity = @ - maturity_to_merge, !.cached_stake = @ + maturity_to_merge]];
-            };
-            locks := locks \ {neuron_id};
-        };
-    };
 
 process ( Split_Neuron \in Split_Neuron_Process_Ids )
     variable
@@ -624,6 +597,7 @@ process ( Merge_Neurons \in Merge_Neurons_Process_Ids )
         target_neuron_id = 0;
 
         \* internal variables
+        fees_amount = 0;
         target_balance = 0;
     {
     MergeNeurons1:
@@ -649,28 +623,56 @@ process ( Merge_Neurons \in Merge_Neurons_Process_Ids )
             await (neuron[source_neuron_id].cached_stake - neuron[source_neuron_id].fees) +
                 (neuron[target_neuron_id].cached_stake - neuron[target_neuron_id].fees) /= 0;
 
-            send_request(self, OP_TRANSFER,
-                    transfer(neuron[source_neuron_id].account,
-                        neuron[target_neuron_id].account,
-                        (neuron[source_neuron_id].cached_stake - neuron[source_neuron_id].fees) - TRANSACTION_FEE,
-                        TRANSACTION_FEE));
+            fees_amount := neuron[source_neuron_id].fees;
+            if(fees_amount > TRANSACTION_FEE) {
+                send_request(self, OP_TRANSFER, transfer(neuron[source_neuron_id].account, Minting_Account_Id, fees_amount, 0));
+            }
+            else {
+                \* There's some code duplication here, but having to have the with statement
+                \* span entire blocks to please Apalache, I don't have a better solution at the moment
+                update_fees(source_neuron_id, fees_amount);
+                send_request(self, OP_TRANSFER,
+                        transfer(neuron[source_neuron_id].account,
+                            neuron[target_neuron_id].account,
+                            (neuron[source_neuron_id].cached_stake - neuron[source_neuron_id].fees) - TRANSACTION_FEE,
+                            TRANSACTION_FEE));
+                goto MergeNeurons3;
+            };
         };
     MergeNeurons2:
+        \* Note that we're here only because the fees amount was larger than the
+        \* transaction fee (otherwise, the goto above would have taken us to MergeNeurons3)
+        with(answer \in { resp \in ledger_to_governance: resp.caller = self}) {
+            ledger_to_governance := ledger_to_governance \ {answer};
+            if(answer.response_value.status = TRANSFER_FAIL){
+                goto MergeNeurons6;
+            }
+            else {
+                update_fees(source_neuron_id, fees_amount);
+                send_request(self, OP_TRANSFER,
+                        transfer(neuron[source_neuron_id].account,
+                            neuron[target_neuron_id].account,
+                            (neuron[source_neuron_id].cached_stake - neuron[source_neuron_id].fees) - TRANSACTION_FEE,
+                            TRANSACTION_FEE));
+            };
+        };
+
+    MergeNeurons3:
         with(answer \in { resp \in ledger_to_governance: resp.caller = self}) {
             ledger_to_governance := ledger_to_governance \ {answer};
             if(answer.response_value.status = TRANSFER_FAIL) {
-                goto MergeNeurons5;
+                goto MergeNeurons6;
             } else {
                 send_request(self, OP_QUERY_BALANCE, balance_query(neuron[target_neuron_id].account));
             };
         };
-    MergeNeurons3:
+    MergeNeurons4:
         with(r \in { r2 \in ledger_to_governance : r2.caller = self }; b = r.response_value.bal ) {
             ledger_to_governance := ledger_to_governance \ {r};
             target_balance := b;
             send_request(self, OP_QUERY_BALANCE, balance_query(neuron[source_neuron_id].account));
         };
-    MergeNeurons4:
+    MergeNeurons5:
         with(r \in { r2 \in ledger_to_governance : r2.caller = self }; source_balance = r.response_value.bal ) {
             ledger_to_governance := ledger_to_governance \ {r};
 
@@ -680,13 +682,11 @@ process ( Merge_Neurons \in Merge_Neurons_Process_Ids )
                     - TRANSACTION_FEE)
                 \/ source_balance /= 0) {
                 \* This error path causes an exploitable violation of Cached_Stake_Capped_By_Balance_When_Not_Locked.
-                \* This error patch should be reachable by the following:
+                \* This error path should be reachable by the following:
                 \* - having nonzero fees on the target neuron
                 \* - sending tokens to the target or source neuron after MergeNeurons1 but before MergeNeruons2 or MergeNeurons3.
-                goto MergeNeurons5;
+                goto MergeNeurons6;
             } else {
-                \* There seems to be a bug in the impl that the source fees are not reset. User is at disadvantage since fees
-                \* will be double-counted.
                 neuron := [neuron EXCEPT
                     ![target_neuron_id] = [@ EXCEPT !.cached_stake = @ +
                         (neuron[source_neuron_id].cached_stake - neuron[source_neuron_id].fees) - TRANSACTION_FEE,
@@ -694,7 +694,7 @@ process ( Merge_Neurons \in Merge_Neurons_Process_Ids )
                     ![source_neuron_id] = [@ EXCEPT !.cached_stake = 0, !.maturity = 0]];
             };
         };
-    MergeNeurons5:
+    MergeNeurons6:
         locks := locks \ {source_neuron_id, target_neuron_id};
     };
 
@@ -804,40 +804,39 @@ process (Increase_Neuron_Maturity \in Increase_Neuron_Maturity_Process_Ids)
 
 *)
 
-\* BEGIN TRANSLATION (chksum(pcal) = "633ab0bc" /\ chksum(tla) = "5068426")
-\* Process variable account_id of process Claim_Neuron at line 278 col 9 changed to account_id_
-\* Process variable neuron_id of process Claim_Neuron at line 280 col 9 changed to neuron_id_
-\* Process variable neuron_id of process Refresh_Neuron at line 313 col 9 changed to neuron_id_R
-\* Process variable neuron_id of process Disburse_Neuron at line 344 col 9 changed to neuron_id_D
-\* Process variable amount of process Disburse_Neuron at line 345 col 9 changed to amount_
-\* Process variable parent_neuron_id of process Spawn_Neuron at line 445 col 9 changed to parent_neuron_id_
-\* Process variable child_neuron_id of process Spawn_Neuron at line 446 col 9 changed to child_neuron_id_
-\* Process variable child_account_id of process Spawn_Neuron at line 448 col 9 changed to child_account_id_
-\* Process variable parent_neuron_id of process Disburse_To_Neuron at line 497 col 9 changed to parent_neuron_id_D
-\* Process variable child_account_id of process Disburse_To_Neuron at line 499 col 9 changed to child_account_id_D
-\* Process variable child_neuron_id of process Disburse_To_Neuron at line 500 col 9 changed to child_neuron_id_D
+\* BEGIN TRANSLATION (chksum(pcal) = "a8f9c45d" /\ chksum(tla) = "92226b68")
+\* Process variable account_id of process Claim_Neuron at line 294 col 9 changed to account_id_
+\* Process variable neuron_id of process Claim_Neuron at line 296 col 9 changed to neuron_id_
+\* Process variable neuron_id of process Refresh_Neuron at line 329 col 9 changed to neuron_id_R
+\* Process variable amount of process Disburse_Neuron at line 361 col 9 changed to amount_
+\* Process variable fees_amount of process Disburse_Neuron at line 366 col 9 changed to fees_amount_
+\* Process variable parent_neuron_id of process Spawn_Neuron at line 440 col 9 changed to parent_neuron_id_
+\* Process variable child_neuron_id of process Spawn_Neuron at line 441 col 9 changed to child_neuron_id_
+\* Process variable child_account_id of process Spawn_Neuron at line 443 col 9 changed to child_account_id_
+\* Process variable parent_neuron_id of process Disburse_To_Neuron at line 492 col 9 changed to parent_neuron_id_D
+\* Process variable child_account_id of process Disburse_To_Neuron at line 494 col 9 changed to child_account_id_D
+\* Process variable child_neuron_id of process Disburse_To_Neuron at line 495 col 9 changed to child_neuron_id_D
 VARIABLES neuron, neuron_id_by_account, locks, neuron_count, total_rewards, 
           minted, burned, governance_to_ledger, ledger_to_governance, pc, 
-          account_id_, neuron_id_, account_id, neuron_id_R, neuron_id_D, 
-          amount_, to_account, rewards_amount, fees_amount, error, 
-          parent_neuron_id_, child_neuron_id_, child_stake, child_account_id_, 
+          account_id_, neuron_id_, account_id, neuron_id_R, neuron_id, 
+          amount_, to_account, fees_amount_, error, parent_neuron_id_, 
+          child_neuron_id_, child_stake, child_account_id_, 
           parent_neuron_id_D, disburse_amount, child_account_id_D, 
-          child_neuron_id_D, neuron_id, maturity_to_merge, parent_neuron_id, 
-          amount, child_neuron_id, child_account_id, source_neuron_id, 
-          target_neuron_id, target_balance, balances, nr_transfers
+          child_neuron_id_D, parent_neuron_id, amount, child_neuron_id, 
+          child_account_id, source_neuron_id, target_neuron_id, fees_amount, 
+          target_balance, balances, nr_transfers
 
 vars == << neuron, neuron_id_by_account, locks, neuron_count, total_rewards, 
            minted, burned, governance_to_ledger, ledger_to_governance, pc, 
-           account_id_, neuron_id_, account_id, neuron_id_R, neuron_id_D, 
-           amount_, to_account, rewards_amount, fees_amount, error, 
-           parent_neuron_id_, child_neuron_id_, child_stake, 
-           child_account_id_, parent_neuron_id_D, disburse_amount, 
-           child_account_id_D, child_neuron_id_D, neuron_id, 
-           maturity_to_merge, parent_neuron_id, amount, child_neuron_id, 
-           child_account_id, source_neuron_id, target_neuron_id, 
+           account_id_, neuron_id_, account_id, neuron_id_R, neuron_id, 
+           amount_, to_account, fees_amount_, error, parent_neuron_id_, 
+           child_neuron_id_, child_stake, child_account_id_, 
+           parent_neuron_id_D, disburse_amount, child_account_id_D, 
+           child_neuron_id_D, parent_neuron_id, amount, child_neuron_id, 
+           child_account_id, source_neuron_id, target_neuron_id, fees_amount, 
            target_balance, balances, nr_transfers >>
 
-ProcSet == (Claim_Neuron_Process_Ids) \cup (Refresh_Neuron_Process_Ids) \cup (Disburse_Neuron_Process_Ids) \cup (Spawn_Neuron_Process_Ids) \cup (Disburse_To_Neuron_Process_Ids) \cup (Merge_Maturity_Of_Neuron_Process_Ids) \cup (Split_Neuron_Process_Ids) \cup (Merge_Neurons_Process_Ids) \cup {Ledger_Process_Id} \cup (Change_Neuron_Fee_Process_Ids) \cup (Increase_Neuron_Maturity_Process_Ids)
+ProcSet == (Claim_Neuron_Process_Ids) \cup (Refresh_Neuron_Process_Ids) \cup (Disburse_Neuron_Process_Ids) \cup (Spawn_Neuron_Process_Ids) \cup (Disburse_To_Neuron_Process_Ids) \cup (Split_Neuron_Process_Ids) \cup (Merge_Neurons_Process_Ids) \cup {Ledger_Process_Id} \cup (Change_Neuron_Fee_Process_Ids) \cup (Increase_Neuron_Maturity_Process_Ids)
 
 Init == (* Global variables *)
         /\ neuron \in [{} -> {}]
@@ -856,11 +855,10 @@ Init == (* Global variables *)
         /\ account_id = [self \in Refresh_Neuron_Process_Ids |-> Minting_Account_Id]
         /\ neuron_id_R = [self \in Refresh_Neuron_Process_Ids |-> 0]
         (* Process Disburse_Neuron *)
-        /\ neuron_id_D = [self \in Disburse_Neuron_Process_Ids |-> 0]
+        /\ neuron_id = [self \in Disburse_Neuron_Process_Ids |-> 0]
         /\ amount_ = [self \in Disburse_Neuron_Process_Ids |-> 0]
         /\ to_account \in [Disburse_Neuron_Process_Ids -> Account_Ids]
-        /\ rewards_amount = [self \in Disburse_Neuron_Process_Ids |-> 0]
-        /\ fees_amount = [self \in Disburse_Neuron_Process_Ids |-> 0]
+        /\ fees_amount_ = [self \in Disburse_Neuron_Process_Ids |-> 0]
         /\ error = [self \in Disburse_Neuron_Process_Ids |-> FALSE]
         (* Process Spawn_Neuron *)
         /\ parent_neuron_id_ = [self \in Spawn_Neuron_Process_Ids |-> 0]
@@ -872,9 +870,6 @@ Init == (* Global variables *)
         /\ disburse_amount = [self \in Disburse_To_Neuron_Process_Ids |-> 0]
         /\ child_account_id_D = [self \in Disburse_To_Neuron_Process_Ids |-> Minting_Account_Id]
         /\ child_neuron_id_D = [self \in Disburse_To_Neuron_Process_Ids |-> 0]
-        (* Process Merge_Maturity_Of_Neuron *)
-        /\ neuron_id = [self \in Merge_Maturity_Of_Neuron_Process_Ids |-> 0]
-        /\ maturity_to_merge = [self \in Merge_Maturity_Of_Neuron_Process_Ids |-> 0]
         (* Process Split_Neuron *)
         /\ parent_neuron_id = [self \in Split_Neuron_Process_Ids |-> 0]
         /\ amount = [self \in Split_Neuron_Process_Ids |-> 0]
@@ -883,6 +878,7 @@ Init == (* Global variables *)
         (* Process Merge_Neurons *)
         /\ source_neuron_id = [self \in Merge_Neurons_Process_Ids |-> 0]
         /\ target_neuron_id = [self \in Merge_Neurons_Process_Ids |-> 0]
+        /\ fees_amount = [self \in Merge_Neurons_Process_Ids |-> 0]
         /\ target_balance = [self \in Merge_Neurons_Process_Ids |-> 0]
         (* Process Ledger *)
         /\ balances = [a \in Governance_Account_Ids \union {Minting_Account_Id} |-> 0] @@ [a \in User_Account_Ids |-> INITIAL_MAX_BALANCE]
@@ -892,7 +888,6 @@ Init == (* Global variables *)
                                         [] self \in Disburse_Neuron_Process_Ids -> "DisburseNeuron1"
                                         [] self \in Spawn_Neuron_Process_Ids -> "SpawnNeuronStart"
                                         [] self \in Disburse_To_Neuron_Process_Ids -> "DisburseToNeuron1"
-                                        [] self \in Merge_Maturity_Of_Neuron_Process_Ids -> "MergeMaturityOfNeuron1"
                                         [] self \in Split_Neuron_Process_Ids -> "SplitNeuron1"
                                         [] self \in Merge_Neurons_Process_Ids -> "MergeNeurons1"
                                         [] self = Ledger_Process_Id -> "LedgerMainLoop"
@@ -905,7 +900,7 @@ ClaimNeuron1(self) == /\ pc[self] = "ClaimNeuron1"
                            /\ neuron_id_' = [neuron_id_ EXCEPT ![self] = neuron_count]
                            /\ neuron_count' = neuron_count + 1
                            /\ Assert(neuron_id_'[self] \notin locks, 
-                                     "Failure of assertion at line 291, column 13.")
+                                     "Failure of assertion at line 307, column 13.")
                            /\ locks' = (locks \union {neuron_id_'[self]})
                            /\ neuron' = (neuron_id_'[self] :> [ cached_stake |-> 0, account |-> account_id_'[self], fees |-> 0, maturity |-> 0 ] @@ neuron)
                            /\ neuron_id_by_account' = (account_id_'[self] :> neuron_id_'[self] @@ neuron_id_by_account)
@@ -913,18 +908,17 @@ ClaimNeuron1(self) == /\ pc[self] = "ClaimNeuron1"
                       /\ pc' = [pc EXCEPT ![self] = "ClaimNeuron2"]
                       /\ UNCHANGED << total_rewards, minted, burned, 
                                       ledger_to_governance, account_id, 
-                                      neuron_id_R, neuron_id_D, amount_, 
-                                      to_account, rewards_amount, fees_amount, 
-                                      error, parent_neuron_id_, 
-                                      child_neuron_id_, child_stake, 
-                                      child_account_id_, parent_neuron_id_D, 
-                                      disburse_amount, child_account_id_D, 
-                                      child_neuron_id_D, neuron_id, 
-                                      maturity_to_merge, parent_neuron_id, 
-                                      amount, child_neuron_id, 
-                                      child_account_id, source_neuron_id, 
-                                      target_neuron_id, target_balance, 
-                                      balances, nr_transfers >>
+                                      neuron_id_R, neuron_id, amount_, 
+                                      to_account, fees_amount_, error, 
+                                      parent_neuron_id_, child_neuron_id_, 
+                                      child_stake, child_account_id_, 
+                                      parent_neuron_id_D, disburse_amount, 
+                                      child_account_id_D, child_neuron_id_D, 
+                                      parent_neuron_id, amount, 
+                                      child_neuron_id, child_account_id, 
+                                      source_neuron_id, target_neuron_id, 
+                                      fees_amount, target_balance, balances, 
+                                      nr_transfers >>
 
 ClaimNeuron2(self) == /\ pc[self] = "ClaimNeuron2"
                       /\ \E r \in { r2 \in ledger_to_governance : r2.caller = self }:
@@ -940,18 +934,17 @@ ClaimNeuron2(self) == /\ pc[self] = "ClaimNeuron2"
                       /\ UNCHANGED << neuron_count, total_rewards, minted, 
                                       burned, governance_to_ledger, 
                                       account_id_, neuron_id_, account_id, 
-                                      neuron_id_R, neuron_id_D, amount_, 
-                                      to_account, rewards_amount, fees_amount, 
-                                      error, parent_neuron_id_, 
-                                      child_neuron_id_, child_stake, 
-                                      child_account_id_, parent_neuron_id_D, 
-                                      disburse_amount, child_account_id_D, 
-                                      child_neuron_id_D, neuron_id, 
-                                      maturity_to_merge, parent_neuron_id, 
-                                      amount, child_neuron_id, 
-                                      child_account_id, source_neuron_id, 
-                                      target_neuron_id, target_balance, 
-                                      balances, nr_transfers >>
+                                      neuron_id_R, neuron_id, amount_, 
+                                      to_account, fees_amount_, error, 
+                                      parent_neuron_id_, child_neuron_id_, 
+                                      child_stake, child_account_id_, 
+                                      parent_neuron_id_D, disburse_amount, 
+                                      child_account_id_D, child_neuron_id_D, 
+                                      parent_neuron_id, amount, 
+                                      child_neuron_id, child_account_id, 
+                                      source_neuron_id, target_neuron_id, 
+                                      fees_amount, target_balance, balances, 
+                                      nr_transfers >>
 
 Claim_Neuron(self) == ClaimNeuron1(self) \/ ClaimNeuron2(self)
 
@@ -965,18 +958,17 @@ RefreshNeuron1(self) == /\ pc[self] = "RefreshNeuron1"
                         /\ UNCHANGED << neuron, neuron_id_by_account, 
                                         neuron_count, total_rewards, minted, 
                                         burned, ledger_to_governance, 
-                                        account_id_, neuron_id_, neuron_id_D, 
-                                        amount_, to_account, rewards_amount, 
-                                        fees_amount, error, parent_neuron_id_, 
+                                        account_id_, neuron_id_, neuron_id, 
+                                        amount_, to_account, fees_amount_, 
+                                        error, parent_neuron_id_, 
                                         child_neuron_id_, child_stake, 
                                         child_account_id_, parent_neuron_id_D, 
                                         disburse_amount, child_account_id_D, 
-                                        child_neuron_id_D, neuron_id, 
-                                        maturity_to_merge, parent_neuron_id, 
+                                        child_neuron_id_D, parent_neuron_id, 
                                         amount, child_neuron_id, 
                                         child_account_id, source_neuron_id, 
-                                        target_neuron_id, target_balance, 
-                                        balances, nr_transfers >>
+                                        target_neuron_id, fees_amount, 
+                                        target_balance, balances, nr_transfers >>
 
 RefreshNeuron2(self) == /\ pc[self] = "RefreshNeuron2"
                         /\ \E r \in { r2 \in ledger_to_governance : r2.caller = self }:
@@ -984,7 +976,7 @@ RefreshNeuron2(self) == /\ pc[self] = "RefreshNeuron2"
                                /\ ledger_to_governance' = ledger_to_governance \ {r}
                                /\ IF b >= MIN_STAKE
                                      THEN /\ Assert((b >= neuron[neuron_id_R[self]].cached_stake), 
-                                                    "Failure of assertion at line 332, column 17.")
+                                                    "Failure of assertion at line 348, column 17.")
                                           /\ neuron' = [neuron EXCEPT ![neuron_id_R[self]] = [@ EXCEPT !.cached_stake = b] ]
                                      ELSE /\ TRUE
                                           /\ UNCHANGED neuron
@@ -994,16 +986,15 @@ RefreshNeuron2(self) == /\ pc[self] = "RefreshNeuron2"
                                         total_rewards, minted, burned, 
                                         governance_to_ledger, account_id_, 
                                         neuron_id_, account_id, neuron_id_R, 
-                                        neuron_id_D, amount_, to_account, 
-                                        rewards_amount, fees_amount, error, 
-                                        parent_neuron_id_, child_neuron_id_, 
-                                        child_stake, child_account_id_, 
-                                        parent_neuron_id_D, disburse_amount, 
-                                        child_account_id_D, child_neuron_id_D, 
-                                        neuron_id, maturity_to_merge, 
-                                        parent_neuron_id, amount, 
-                                        child_neuron_id, child_account_id, 
-                                        source_neuron_id, target_neuron_id, 
+                                        neuron_id, amount_, to_account, 
+                                        fees_amount_, error, parent_neuron_id_, 
+                                        child_neuron_id_, child_stake, 
+                                        child_account_id_, parent_neuron_id_D, 
+                                        disburse_amount, child_account_id_D, 
+                                        child_neuron_id_D, parent_neuron_id, 
+                                        amount, child_neuron_id, 
+                                        child_account_id, source_neuron_id, 
+                                        target_neuron_id, fees_amount, 
                                         target_balance, balances, nr_transfers >>
 
 Refresh_Neuron(self) == RefreshNeuron1(self) \/ RefreshNeuron2(self)
@@ -1011,19 +1002,18 @@ Refresh_Neuron(self) == RefreshNeuron1(self) \/ RefreshNeuron2(self)
 DisburseNeuron1(self) == /\ pc[self] = "DisburseNeuron1"
                          /\ \E nid \in DOMAIN(neuron) \ locks:
                               \E amt \in 0..neuron[nid].cached_stake:
-                                /\ neuron_id_D' = [neuron_id_D EXCEPT ![self] = nid]
+                                /\ neuron_id' = [neuron_id EXCEPT ![self] = nid]
                                 /\ amount_' = [amount_ EXCEPT ![self] = amt]
-                                /\ rewards_amount' = [rewards_amount EXCEPT ![self] = neuron[neuron_id_D'[self]].maturity]
-                                /\ fees_amount' = [fees_amount EXCEPT ![self] = neuron[neuron_id_D'[self]].fees]
-                                /\ locks' = (locks \union {neuron_id_D'[self]})
-                                /\ IF fees_amount'[self] > TRANSACTION_FEE
-                                      THEN /\ governance_to_ledger' = Append(governance_to_ledger, request(self, OP_TRANSFER, (transfer(neuron[neuron_id_D'[self]].account, Minting_Account_Id, fees_amount'[self], 0))))
+                                /\ fees_amount_' = [fees_amount_ EXCEPT ![self] = neuron[neuron_id'[self]].fees]
+                                /\ locks' = (locks \union {neuron_id'[self]})
+                                /\ IF fees_amount_'[self] > TRANSACTION_FEE
+                                      THEN /\ governance_to_ledger' = Append(governance_to_ledger, request(self, OP_TRANSFER, (transfer(neuron[neuron_id'[self]].account, Minting_Account_Id, fees_amount_'[self], 0))))
                                            /\ pc' = [pc EXCEPT ![self] = "DisburseNeuron2"]
                                            /\ UNCHANGED neuron
-                                      ELSE /\ IF neuron[neuron_id_D'[self]].cached_stake > fees_amount'[self]
-                                                 THEN /\ neuron' = [neuron EXCEPT ![neuron_id_D'[self]] = [@ EXCEPT !.cached_stake = @ - fees_amount'[self], !.fees = 0]]
-                                                 ELSE /\ neuron' = [neuron EXCEPT ![neuron_id_D'[self]] = [@ EXCEPT !.cached_stake = 0, !.fees = 0]]
-                                           /\ governance_to_ledger' = Append(governance_to_ledger, request(self, OP_TRANSFER, (transfer(neuron'[neuron_id_D'[self]].account, to_account[self], calc_disburse_amount(amount_'[self], fees_amount'[self]), TRANSACTION_FEE))))
+                                      ELSE /\ IF neuron[neuron_id'[self]].cached_stake > fees_amount_'[self]
+                                                 THEN /\ neuron' = [neuron EXCEPT ![neuron_id'[self]] = [@ EXCEPT !.cached_stake = @ - fees_amount_'[self], !.fees = 0]]
+                                                 ELSE /\ neuron' = [neuron EXCEPT ![neuron_id'[self]] = [@ EXCEPT !.cached_stake = 0, !.fees = 0]]
+                                           /\ governance_to_ledger' = Append(governance_to_ledger, request(self, OP_TRANSFER, (transfer(neuron'[neuron_id'[self]].account, to_account[self], calc_disburse_amount(amount_'[self], fees_amount_'[self]), TRANSACTION_FEE))))
                                            /\ pc' = [pc EXCEPT ![self] = "DisburseNeuron3"]
                          /\ UNCHANGED << neuron_id_by_account, neuron_count, 
                                          total_rewards, minted, burned, 
@@ -1033,12 +1023,12 @@ DisburseNeuron1(self) == /\ pc[self] = "DisburseNeuron1"
                                          child_neuron_id_, child_stake, 
                                          child_account_id_, parent_neuron_id_D, 
                                          disburse_amount, child_account_id_D, 
-                                         child_neuron_id_D, neuron_id, 
-                                         maturity_to_merge, parent_neuron_id, 
+                                         child_neuron_id_D, parent_neuron_id, 
                                          amount, child_neuron_id, 
                                          child_account_id, source_neuron_id, 
-                                         target_neuron_id, target_balance, 
-                                         balances, nr_transfers >>
+                                         target_neuron_id, fees_amount, 
+                                         target_balance, balances, 
+                                         nr_transfers >>
 
 DisburseNeuron2(self) == /\ pc[self] = "DisburseNeuron2"
                          /\ \E answer \in { resp \in ledger_to_governance: resp.caller = self}:
@@ -1048,27 +1038,26 @@ DisburseNeuron2(self) == /\ pc[self] = "DisburseNeuron2"
                                          /\ pc' = [pc EXCEPT ![self] = "DisburseNeuronEnd"]
                                          /\ UNCHANGED << neuron, 
                                                          governance_to_ledger >>
-                                    ELSE /\ IF neuron[neuron_id_D[self]].cached_stake > fees_amount[self]
-                                               THEN /\ neuron' = [neuron EXCEPT ![neuron_id_D[self]] = [@ EXCEPT !.cached_stake = @ - fees_amount[self], !.fees = 0]]
-                                               ELSE /\ neuron' = [neuron EXCEPT ![neuron_id_D[self]] = [@ EXCEPT !.cached_stake = 0, !.fees = 0]]
-                                         /\ governance_to_ledger' = Append(governance_to_ledger, request(self, OP_TRANSFER, (transfer(neuron'[neuron_id_D[self]].account, to_account[self], calc_disburse_amount(amount_[self], fees_amount[self]), TRANSACTION_FEE))))
+                                    ELSE /\ IF neuron[neuron_id[self]].cached_stake > fees_amount_[self]
+                                               THEN /\ neuron' = [neuron EXCEPT ![neuron_id[self]] = [@ EXCEPT !.cached_stake = @ - fees_amount_[self], !.fees = 0]]
+                                               ELSE /\ neuron' = [neuron EXCEPT ![neuron_id[self]] = [@ EXCEPT !.cached_stake = 0, !.fees = 0]]
+                                         /\ governance_to_ledger' = Append(governance_to_ledger, request(self, OP_TRANSFER, (transfer(neuron'[neuron_id[self]].account, to_account[self], calc_disburse_amount(amount_[self], fees_amount_[self]), TRANSACTION_FEE))))
                                          /\ pc' = [pc EXCEPT ![self] = "DisburseNeuron3"]
                                          /\ error' = error
                          /\ UNCHANGED << neuron_id_by_account, locks, 
                                          neuron_count, total_rewards, minted, 
                                          burned, account_id_, neuron_id_, 
-                                         account_id, neuron_id_R, neuron_id_D, 
-                                         amount_, to_account, rewards_amount, 
-                                         fees_amount, parent_neuron_id_, 
-                                         child_neuron_id_, child_stake, 
-                                         child_account_id_, parent_neuron_id_D, 
-                                         disburse_amount, child_account_id_D, 
-                                         child_neuron_id_D, neuron_id, 
-                                         maturity_to_merge, parent_neuron_id, 
-                                         amount, child_neuron_id, 
-                                         child_account_id, source_neuron_id, 
-                                         target_neuron_id, target_balance, 
-                                         balances, nr_transfers >>
+                                         account_id, neuron_id_R, neuron_id, 
+                                         amount_, to_account, fees_amount_, 
+                                         parent_neuron_id_, child_neuron_id_, 
+                                         child_stake, child_account_id_, 
+                                         parent_neuron_id_D, disburse_amount, 
+                                         child_account_id_D, child_neuron_id_D, 
+                                         parent_neuron_id, amount, 
+                                         child_neuron_id, child_account_id, 
+                                         source_neuron_id, target_neuron_id, 
+                                         fees_amount, target_balance, balances, 
+                                         nr_transfers >>
 
 DisburseNeuron3(self) == /\ pc[self] = "DisburseNeuron3"
                          /\ \E answer \in { resp \in ledger_to_governance: resp.caller = self}:
@@ -1076,84 +1065,51 @@ DisburseNeuron3(self) == /\ pc[self] = "DisburseNeuron3"
                               /\ IF answer.response_value.status = TRANSFER_FAIL
                                     THEN /\ error' = [error EXCEPT ![self] = TRUE]
                                          /\ pc' = [pc EXCEPT ![self] = "DisburseNeuronEnd"]
-                                         /\ UNCHANGED << neuron, 
-                                                         governance_to_ledger >>
-                                    ELSE /\ IF to_deduct(calc_disburse_amount(amount_[self], fees_amount[self])) >= neuron[neuron_id_D[self]].cached_stake
-                                               THEN /\ neuron' = [neuron EXCEPT ![neuron_id_D[self]] = [@ EXCEPT !.cached_stake = 0]]
-                                               ELSE /\ neuron' = [neuron EXCEPT ![neuron_id_D[self]] = [@ EXCEPT !.cached_stake = @ - to_deduct(calc_disburse_amount(amount_[self], fees_amount[self]))]]
-                                         /\ IF rewards_amount[self] > TRANSACTION_FEE
-                                               THEN /\ governance_to_ledger' = Append(governance_to_ledger, request(self, OP_TRANSFER, (transfer(Minting_Account_Id, to_account[self], rewards_amount[self], 0))))
-                                                    /\ pc' = [pc EXCEPT ![self] = "DisburseNeuron4"]
-                                               ELSE /\ pc' = [pc EXCEPT ![self] = "DisburseNeuronEnd"]
-                                                    /\ UNCHANGED governance_to_ledger
+                                         /\ UNCHANGED neuron
+                                    ELSE /\ IF to_deduct(calc_disburse_amount(amount_[self], fees_amount_[self])) >= neuron[neuron_id[self]].cached_stake
+                                               THEN /\ neuron' = [neuron EXCEPT ![neuron_id[self]] = [@ EXCEPT !.cached_stake = 0]]
+                                               ELSE /\ neuron' = [neuron EXCEPT ![neuron_id[self]] = [@ EXCEPT !.cached_stake = @ - to_deduct(calc_disburse_amount(amount_[self], fees_amount_[self]))]]
+                                         /\ pc' = [pc EXCEPT ![self] = "DisburseNeuronEnd"]
                                          /\ error' = error
                          /\ UNCHANGED << neuron_id_by_account, locks, 
                                          neuron_count, total_rewards, minted, 
-                                         burned, account_id_, neuron_id_, 
-                                         account_id, neuron_id_R, neuron_id_D, 
-                                         amount_, to_account, rewards_amount, 
-                                         fees_amount, parent_neuron_id_, 
-                                         child_neuron_id_, child_stake, 
-                                         child_account_id_, parent_neuron_id_D, 
-                                         disburse_amount, child_account_id_D, 
-                                         child_neuron_id_D, neuron_id, 
-                                         maturity_to_merge, parent_neuron_id, 
-                                         amount, child_neuron_id, 
-                                         child_account_id, source_neuron_id, 
-                                         target_neuron_id, target_balance, 
-                                         balances, nr_transfers >>
-
-DisburseNeuron4(self) == /\ pc[self] = "DisburseNeuron4"
-                         /\ \E answer \in { resp \in ledger_to_governance: resp.caller = self}:
-                              /\ ledger_to_governance' = ledger_to_governance \ {answer}
-                              /\ IF answer.response_value.status = TRANSFER_FAIL
-                                    THEN /\ pc' = [pc EXCEPT ![self] = "DisburseNeuronEnd"]
-                                    ELSE /\ pc' = [pc EXCEPT ![self] = "DisburseNeuronEnd"]
-                         /\ UNCHANGED << neuron, neuron_id_by_account, locks, 
-                                         neuron_count, total_rewards, minted, 
                                          burned, governance_to_ledger, 
                                          account_id_, neuron_id_, account_id, 
-                                         neuron_id_R, neuron_id_D, amount_, 
-                                         to_account, rewards_amount, 
-                                         fees_amount, error, parent_neuron_id_, 
-                                         child_neuron_id_, child_stake, 
-                                         child_account_id_, parent_neuron_id_D, 
-                                         disburse_amount, child_account_id_D, 
-                                         child_neuron_id_D, neuron_id, 
-                                         maturity_to_merge, parent_neuron_id, 
-                                         amount, child_neuron_id, 
-                                         child_account_id, source_neuron_id, 
-                                         target_neuron_id, target_balance, 
-                                         balances, nr_transfers >>
+                                         neuron_id_R, neuron_id, amount_, 
+                                         to_account, fees_amount_, 
+                                         parent_neuron_id_, child_neuron_id_, 
+                                         child_stake, child_account_id_, 
+                                         parent_neuron_id_D, disburse_amount, 
+                                         child_account_id_D, child_neuron_id_D, 
+                                         parent_neuron_id, amount, 
+                                         child_neuron_id, child_account_id, 
+                                         source_neuron_id, target_neuron_id, 
+                                         fees_amount, target_balance, balances, 
+                                         nr_transfers >>
 
 DisburseNeuronEnd(self) == /\ pc[self] = "DisburseNeuronEnd"
-                           /\ IF ~error[self]
-                                 THEN /\ neuron' = [neuron EXCEPT ![neuron_id_D[self]] = [@ EXCEPT !.maturity = 0]]
-                                 ELSE /\ TRUE
-                                      /\ UNCHANGED neuron
-                           /\ locks' = locks \ {neuron_id_D[self]}
+                           /\ locks' = locks \ {neuron_id[self]}
                            /\ pc' = [pc EXCEPT ![self] = "Done"]
-                           /\ UNCHANGED << neuron_id_by_account, neuron_count, 
-                                           total_rewards, minted, burned, 
-                                           governance_to_ledger, 
+                           /\ UNCHANGED << neuron, neuron_id_by_account, 
+                                           neuron_count, total_rewards, minted, 
+                                           burned, governance_to_ledger, 
                                            ledger_to_governance, account_id_, 
                                            neuron_id_, account_id, neuron_id_R, 
-                                           neuron_id_D, amount_, to_account, 
-                                           rewards_amount, fees_amount, error, 
+                                           neuron_id, amount_, to_account, 
+                                           fees_amount_, error, 
                                            parent_neuron_id_, child_neuron_id_, 
                                            child_stake, child_account_id_, 
                                            parent_neuron_id_D, disburse_amount, 
                                            child_account_id_D, 
-                                           child_neuron_id_D, neuron_id, 
-                                           maturity_to_merge, parent_neuron_id, 
+                                           child_neuron_id_D, parent_neuron_id, 
                                            amount, child_neuron_id, 
                                            child_account_id, source_neuron_id, 
-                                           target_neuron_id, target_balance, 
-                                           balances, nr_transfers >>
+                                           target_neuron_id, fees_amount, 
+                                           target_balance, balances, 
+                                           nr_transfers >>
 
 Disburse_Neuron(self) == DisburseNeuron1(self) \/ DisburseNeuron2(self)
                             \/ DisburseNeuron3(self)
-                            \/ DisburseNeuron4(self)
                             \/ DisburseNeuronEnd(self)
 
 SpawnNeuronStart(self) == /\ pc[self] = "SpawnNeuronStart"
@@ -1168,23 +1124,23 @@ SpawnNeuronStart(self) == /\ pc[self] = "SpawnNeuronStart"
                                  /\ neuron' = (child_neuron_id_'[self] :> [ cached_stake |-> 0, account |-> child_account_id_'[self], fees |-> 0, maturity |-> 0 ] @@ neuron)
                                  /\ neuron_id_by_account' = (child_account_id_'[self] :> child_neuron_id_'[self] @@ neuron_id_by_account)
                                  /\ Assert(child_neuron_id_'[self] \notin locks, 
-                                           "Failure of assertion at line 473, column 13.")
+                                           "Failure of assertion at line 468, column 13.")
                                  /\ locks' = (locks \union {parent_neuron_id_'[self], child_neuron_id_'[self]})
                                  /\ governance_to_ledger' = Append(governance_to_ledger, request(self, OP_TRANSFER, (transfer(Minting_Account_Id, child_account_id_'[self], child_stake'[self], 0))))
                           /\ pc' = [pc EXCEPT ![self] = "SpawnNeuronEnd"]
                           /\ UNCHANGED << total_rewards, minted, burned, 
                                           ledger_to_governance, account_id_, 
                                           neuron_id_, account_id, neuron_id_R, 
-                                          neuron_id_D, amount_, to_account, 
-                                          rewards_amount, fees_amount, error, 
+                                          neuron_id, amount_, to_account, 
+                                          fees_amount_, error, 
                                           parent_neuron_id_D, disburse_amount, 
                                           child_account_id_D, 
-                                          child_neuron_id_D, neuron_id, 
-                                          maturity_to_merge, parent_neuron_id, 
+                                          child_neuron_id_D, parent_neuron_id, 
                                           amount, child_neuron_id, 
                                           child_account_id, source_neuron_id, 
-                                          target_neuron_id, target_balance, 
-                                          balances, nr_transfers >>
+                                          target_neuron_id, fees_amount, 
+                                          target_balance, balances, 
+                                          nr_transfers >>
 
 SpawnNeuronEnd(self) == /\ pc[self] = "SpawnNeuronEnd"
                         /\ \E answer \in { resp \in ledger_to_governance: resp.caller = self}:
@@ -1200,25 +1156,24 @@ SpawnNeuronEnd(self) == /\ pc[self] = "SpawnNeuronEnd"
                         /\ UNCHANGED << neuron_count, total_rewards, minted, 
                                         burned, governance_to_ledger, 
                                         account_id_, neuron_id_, account_id, 
-                                        neuron_id_R, neuron_id_D, amount_, 
-                                        to_account, rewards_amount, 
-                                        fees_amount, error, parent_neuron_id_, 
-                                        child_neuron_id_, child_stake, 
-                                        child_account_id_, parent_neuron_id_D, 
-                                        disburse_amount, child_account_id_D, 
-                                        child_neuron_id_D, neuron_id, 
-                                        maturity_to_merge, parent_neuron_id, 
-                                        amount, child_neuron_id, 
-                                        child_account_id, source_neuron_id, 
-                                        target_neuron_id, target_balance, 
-                                        balances, nr_transfers >>
+                                        neuron_id_R, neuron_id, amount_, 
+                                        to_account, fees_amount_, error, 
+                                        parent_neuron_id_, child_neuron_id_, 
+                                        child_stake, child_account_id_, 
+                                        parent_neuron_id_D, disburse_amount, 
+                                        child_account_id_D, child_neuron_id_D, 
+                                        parent_neuron_id, amount, 
+                                        child_neuron_id, child_account_id, 
+                                        source_neuron_id, target_neuron_id, 
+                                        fees_amount, target_balance, balances, 
+                                        nr_transfers >>
 
 Spawn_Neuron(self) == SpawnNeuronStart(self) \/ SpawnNeuronEnd(self)
 
 DisburseToNeuron1(self) == /\ pc[self] = "DisburseToNeuron1"
                            /\ \E nid \in DOMAIN(neuron) \ locks:
                                 LET parent_neuron == neuron[nid] IN
-                                  \E amt \in (MIN_STAKE + TRANSACTION_FEE)..(parent_neuron.cached_stake - MIN_STAKE):
+                                  \E amt \in (MIN_STAKE + TRANSACTION_FEE)..(parent_neuron.cached_stake - parent_neuron.fees - MIN_STAKE):
                                     \E c_acc_id \in Governance_Account_Ids \ { neuron[n].account : n \in DOMAIN(neuron)}:
                                       /\ parent_neuron_id_D' = [parent_neuron_id_D EXCEPT ![self] = nid]
                                       /\ disburse_amount' = [disburse_amount EXCEPT ![self] = amt]
@@ -1229,23 +1184,22 @@ DisburseToNeuron1(self) == /\ pc[self] = "DisburseToNeuron1"
                                       /\ neuron' = (child_neuron_id_D'[self] :> [ cached_stake |-> 0, account |-> child_account_id_D'[self], fees |-> 0, maturity |-> 0 ] @@ neuron)
                                       /\ neuron_id_by_account' = (child_account_id_D'[self] :> child_neuron_id_D'[self] @@ neuron_id_by_account)
                                       /\ Assert(child_neuron_id_D'[self] \notin locks, 
-                                                "Failure of assertion at line 523, column 13.")
+                                                "Failure of assertion at line 518, column 13.")
                                       /\ locks' = (locks \union {parent_neuron_id_D'[self], child_neuron_id_D'[self]})
                                       /\ governance_to_ledger' = Append(governance_to_ledger, request(self, OP_TRANSFER, (transfer(parent_neuron.account, child_account_id_D'[self], disburse_amount'[self] - TRANSACTION_FEE, TRANSACTION_FEE))))
                            /\ pc' = [pc EXCEPT ![self] = "DisburseToNeuronEnd"]
                            /\ UNCHANGED << total_rewards, minted, burned, 
                                            ledger_to_governance, account_id_, 
                                            neuron_id_, account_id, neuron_id_R, 
-                                           neuron_id_D, amount_, to_account, 
-                                           rewards_amount, fees_amount, error, 
+                                           neuron_id, amount_, to_account, 
+                                           fees_amount_, error, 
                                            parent_neuron_id_, child_neuron_id_, 
                                            child_stake, child_account_id_, 
-                                           neuron_id, maturity_to_merge, 
                                            parent_neuron_id, amount, 
                                            child_neuron_id, child_account_id, 
                                            source_neuron_id, target_neuron_id, 
-                                           target_balance, balances, 
-                                           nr_transfers >>
+                                           fees_amount, target_balance, 
+                                           balances, nr_transfers >>
 
 DisburseToNeuronEnd(self) == /\ pc[self] = "DisburseToNeuronEnd"
                              /\ \E answer \in { resp \in ledger_to_governance: resp.caller = self}:
@@ -1262,94 +1216,24 @@ DisburseToNeuronEnd(self) == /\ pc[self] = "DisburseToNeuronEnd"
                                              minted, burned, 
                                              governance_to_ledger, account_id_, 
                                              neuron_id_, account_id, 
-                                             neuron_id_R, neuron_id_D, amount_, 
-                                             to_account, rewards_amount, 
-                                             fees_amount, error, 
+                                             neuron_id_R, neuron_id, amount_, 
+                                             to_account, fees_amount_, error, 
                                              parent_neuron_id_, 
                                              child_neuron_id_, child_stake, 
                                              child_account_id_, 
                                              parent_neuron_id_D, 
                                              disburse_amount, 
                                              child_account_id_D, 
-                                             child_neuron_id_D, neuron_id, 
-                                             maturity_to_merge, 
+                                             child_neuron_id_D, 
                                              parent_neuron_id, amount, 
                                              child_neuron_id, child_account_id, 
                                              source_neuron_id, 
-                                             target_neuron_id, target_balance, 
-                                             balances, nr_transfers >>
+                                             target_neuron_id, fees_amount, 
+                                             target_balance, balances, 
+                                             nr_transfers >>
 
 Disburse_To_Neuron(self) == DisburseToNeuron1(self)
                                \/ DisburseToNeuronEnd(self)
-
-MergeMaturityOfNeuron1(self) == /\ pc[self] = "MergeMaturityOfNeuron1"
-                                /\ \E nid \in DOMAIN(neuron) \ locks:
-                                     \E maturity_to_merge_tmp \in (TRANSACTION_FEE+1)..neuron[nid].maturity:
-                                       /\ neuron_id' = [neuron_id EXCEPT ![self] = nid]
-                                       /\ maturity_to_merge' = [maturity_to_merge EXCEPT ![self] = maturity_to_merge_tmp]
-                                       /\ locks' = (locks \union {neuron_id'[self]})
-                                       /\ governance_to_ledger' = Append(governance_to_ledger, request(self, OP_TRANSFER, (transfer(Minting_Account_Id, neuron[neuron_id'[self]].account, maturity_to_merge'[self], 0))))
-                                /\ pc' = [pc EXCEPT ![self] = "MergeMaturityOfNeuron2"]
-                                /\ UNCHANGED << neuron, neuron_id_by_account, 
-                                                neuron_count, total_rewards, 
-                                                minted, burned, 
-                                                ledger_to_governance, 
-                                                account_id_, neuron_id_, 
-                                                account_id, neuron_id_R, 
-                                                neuron_id_D, amount_, 
-                                                to_account, rewards_amount, 
-                                                fees_amount, error, 
-                                                parent_neuron_id_, 
-                                                child_neuron_id_, child_stake, 
-                                                child_account_id_, 
-                                                parent_neuron_id_D, 
-                                                disburse_amount, 
-                                                child_account_id_D, 
-                                                child_neuron_id_D, 
-                                                parent_neuron_id, amount, 
-                                                child_neuron_id, 
-                                                child_account_id, 
-                                                source_neuron_id, 
-                                                target_neuron_id, 
-                                                target_balance, balances, 
-                                                nr_transfers >>
-
-MergeMaturityOfNeuron2(self) == /\ pc[self] = "MergeMaturityOfNeuron2"
-                                /\ \E answer \in { resp \in ledger_to_governance: resp.caller = self}:
-                                     /\ ledger_to_governance' = ledger_to_governance \ {answer}
-                                     /\ IF answer.response_value.status # TRANSFER_FAIL
-                                           THEN /\ neuron' = [neuron EXCEPT ![neuron_id[self]] = [@ EXCEPT !.maturity = @ - maturity_to_merge[self], !.cached_stake = @ + maturity_to_merge[self]]]
-                                           ELSE /\ TRUE
-                                                /\ UNCHANGED neuron
-                                     /\ locks' = locks \ {neuron_id[self]}
-                                /\ pc' = [pc EXCEPT ![self] = "Done"]
-                                /\ UNCHANGED << neuron_id_by_account, 
-                                                neuron_count, total_rewards, 
-                                                minted, burned, 
-                                                governance_to_ledger, 
-                                                account_id_, neuron_id_, 
-                                                account_id, neuron_id_R, 
-                                                neuron_id_D, amount_, 
-                                                to_account, rewards_amount, 
-                                                fees_amount, error, 
-                                                parent_neuron_id_, 
-                                                child_neuron_id_, child_stake, 
-                                                child_account_id_, 
-                                                parent_neuron_id_D, 
-                                                disburse_amount, 
-                                                child_account_id_D, 
-                                                child_neuron_id_D, neuron_id, 
-                                                maturity_to_merge, 
-                                                parent_neuron_id, amount, 
-                                                child_neuron_id, 
-                                                child_account_id, 
-                                                source_neuron_id, 
-                                                target_neuron_id, 
-                                                target_balance, balances, 
-                                                nr_transfers >>
-
-Merge_Maturity_Of_Neuron(self) == MergeMaturityOfNeuron1(self)
-                                     \/ MergeMaturityOfNeuron2(self)
 
 SplitNeuron1(self) == /\ pc[self] = "SplitNeuron1"
                       /\ \E nid \in DOMAIN(neuron) \ locks:
@@ -1361,7 +1245,7 @@ SplitNeuron1(self) == /\ pc[self] = "SplitNeuron1"
                                /\ child_neuron_id' = [child_neuron_id EXCEPT ![self] = neuron_count]
                                /\ neuron_count' = neuron_count + 1
                                /\ Assert(child_neuron_id'[self] \notin locks, 
-                                         "Failure of assertion at line 591, column 13.")
+                                         "Failure of assertion at line 562, column 13.")
                                /\ neuron' = (child_neuron_id'[self] :> [ cached_stake |-> 0, account |-> child_account_id'[self], fees |-> 0, maturity |-> 0 ] @@ neuron)
                                /\ neuron_id_by_account' = (child_account_id'[self] :> child_neuron_id'[self] @@ neuron_id_by_account)
                                /\ (amount'[self] >= MIN_STAKE + TRANSACTION_FEE /\ neuron'[parent_neuron_id'[self]].cached_stake - neuron'[parent_neuron_id'[self]].fees >= MIN_STAKE + amount'[self])
@@ -1372,14 +1256,13 @@ SplitNeuron1(self) == /\ pc[self] = "SplitNeuron1"
                       /\ UNCHANGED << total_rewards, minted, burned, 
                                       ledger_to_governance, account_id_, 
                                       neuron_id_, account_id, neuron_id_R, 
-                                      neuron_id_D, amount_, to_account, 
-                                      rewards_amount, fees_amount, error, 
-                                      parent_neuron_id_, child_neuron_id_, 
-                                      child_stake, child_account_id_, 
-                                      parent_neuron_id_D, disburse_amount, 
-                                      child_account_id_D, child_neuron_id_D, 
-                                      neuron_id, maturity_to_merge, 
-                                      source_neuron_id, target_neuron_id, 
+                                      neuron_id, amount_, to_account, 
+                                      fees_amount_, error, parent_neuron_id_, 
+                                      child_neuron_id_, child_stake, 
+                                      child_account_id_, parent_neuron_id_D, 
+                                      disburse_amount, child_account_id_D, 
+                                      child_neuron_id_D, source_neuron_id, 
+                                      target_neuron_id, fees_amount, 
                                       target_balance, balances, nr_transfers >>
 
 SplitNeuron2(self) == /\ pc[self] = "SplitNeuron2"
@@ -1396,18 +1279,17 @@ SplitNeuron2(self) == /\ pc[self] = "SplitNeuron2"
                       /\ UNCHANGED << neuron_count, total_rewards, minted, 
                                       burned, governance_to_ledger, 
                                       account_id_, neuron_id_, account_id, 
-                                      neuron_id_R, neuron_id_D, amount_, 
-                                      to_account, rewards_amount, fees_amount, 
-                                      error, parent_neuron_id_, 
-                                      child_neuron_id_, child_stake, 
-                                      child_account_id_, parent_neuron_id_D, 
-                                      disburse_amount, child_account_id_D, 
-                                      child_neuron_id_D, neuron_id, 
-                                      maturity_to_merge, parent_neuron_id, 
-                                      amount, child_neuron_id, 
-                                      child_account_id, source_neuron_id, 
-                                      target_neuron_id, target_balance, 
-                                      balances, nr_transfers >>
+                                      neuron_id_R, neuron_id, amount_, 
+                                      to_account, fees_amount_, error, 
+                                      parent_neuron_id_, child_neuron_id_, 
+                                      child_stake, child_account_id_, 
+                                      parent_neuron_id_D, disburse_amount, 
+                                      child_account_id_D, child_neuron_id_D, 
+                                      parent_neuron_id, amount, 
+                                      child_neuron_id, child_account_id, 
+                                      source_neuron_id, target_neuron_id, 
+                                      fees_amount, target_balance, balances, 
+                                      nr_transfers >>
 
 Split_Neuron(self) == SplitNeuron1(self) \/ SplitNeuron2(self)
 
@@ -1420,23 +1302,29 @@ MergeNeurons1(self) == /\ pc[self] = "MergeNeurons1"
                               /\ locks' = (locks \union {source_neuron_id'[self], target_neuron_id'[self]})
                               /\   (neuron[source_neuron_id'[self]].cached_stake - neuron[source_neuron_id'[self]].fees) +
                                  (neuron[target_neuron_id'[self]].cached_stake - neuron[target_neuron_id'[self]].fees) /= 0
-                              /\ governance_to_ledger' = Append(governance_to_ledger, request(self, OP_TRANSFER, (transfer(neuron[source_neuron_id'[self]].account,
-                                                                                                                      neuron[target_neuron_id'[self]].account,
-                                                                                                                      (neuron[source_neuron_id'[self]].cached_stake - neuron[source_neuron_id'[self]].fees) - TRANSACTION_FEE,
-                                                                                                                      TRANSACTION_FEE))))
-                       /\ pc' = [pc EXCEPT ![self] = "MergeNeurons2"]
-                       /\ UNCHANGED << neuron, neuron_id_by_account, 
-                                       neuron_count, total_rewards, minted, 
-                                       burned, ledger_to_governance, 
-                                       account_id_, neuron_id_, account_id, 
-                                       neuron_id_R, neuron_id_D, amount_, 
-                                       to_account, rewards_amount, fees_amount, 
-                                       error, parent_neuron_id_, 
+                              /\ fees_amount' = [fees_amount EXCEPT ![self] = neuron[source_neuron_id'[self]].fees]
+                              /\ IF fees_amount'[self] > TRANSACTION_FEE
+                                    THEN /\ governance_to_ledger' = Append(governance_to_ledger, request(self, OP_TRANSFER, (transfer(neuron[source_neuron_id'[self]].account, Minting_Account_Id, fees_amount'[self], 0))))
+                                         /\ pc' = [pc EXCEPT ![self] = "MergeNeurons2"]
+                                         /\ UNCHANGED neuron
+                                    ELSE /\ IF neuron[source_neuron_id'[self]].cached_stake > fees_amount'[self]
+                                               THEN /\ neuron' = [neuron EXCEPT ![source_neuron_id'[self]] = [@ EXCEPT !.cached_stake = @ - fees_amount'[self], !.fees = 0]]
+                                               ELSE /\ neuron' = [neuron EXCEPT ![source_neuron_id'[self]] = [@ EXCEPT !.cached_stake = 0, !.fees = 0]]
+                                         /\ governance_to_ledger' = Append(governance_to_ledger, request(self, OP_TRANSFER, (transfer(neuron'[source_neuron_id'[self]].account,
+                                                                                                                                 neuron'[target_neuron_id'[self]].account,
+                                                                                                                                 (neuron'[source_neuron_id'[self]].cached_stake - neuron'[source_neuron_id'[self]].fees) - TRANSACTION_FEE,
+                                                                                                                                 TRANSACTION_FEE))))
+                                         /\ pc' = [pc EXCEPT ![self] = "MergeNeurons3"]
+                       /\ UNCHANGED << neuron_id_by_account, neuron_count, 
+                                       total_rewards, minted, burned, 
+                                       ledger_to_governance, account_id_, 
+                                       neuron_id_, account_id, neuron_id_R, 
+                                       neuron_id, amount_, to_account, 
+                                       fees_amount_, error, parent_neuron_id_, 
                                        child_neuron_id_, child_stake, 
                                        child_account_id_, parent_neuron_id_D, 
                                        disburse_amount, child_account_id_D, 
-                                       child_neuron_id_D, neuron_id, 
-                                       maturity_to_merge, parent_neuron_id, 
+                                       child_neuron_id_D, parent_neuron_id, 
                                        amount, child_neuron_id, 
                                        child_account_id, target_balance, 
                                        balances, nr_transfers >>
@@ -1445,50 +1333,78 @@ MergeNeurons2(self) == /\ pc[self] = "MergeNeurons2"
                        /\ \E answer \in { resp \in ledger_to_governance: resp.caller = self}:
                             /\ ledger_to_governance' = ledger_to_governance \ {answer}
                             /\ IF answer.response_value.status = TRANSFER_FAIL
-                                  THEN /\ pc' = [pc EXCEPT ![self] = "MergeNeurons5"]
-                                       /\ UNCHANGED governance_to_ledger
-                                  ELSE /\ governance_to_ledger' = Append(governance_to_ledger, request(self, OP_QUERY_BALANCE, (balance_query(neuron[target_neuron_id[self]].account))))
+                                  THEN /\ pc' = [pc EXCEPT ![self] = "MergeNeurons6"]
+                                       /\ UNCHANGED << neuron, 
+                                                       governance_to_ledger >>
+                                  ELSE /\ IF neuron[source_neuron_id[self]].cached_stake > fees_amount[self]
+                                             THEN /\ neuron' = [neuron EXCEPT ![source_neuron_id[self]] = [@ EXCEPT !.cached_stake = @ - fees_amount[self], !.fees = 0]]
+                                             ELSE /\ neuron' = [neuron EXCEPT ![source_neuron_id[self]] = [@ EXCEPT !.cached_stake = 0, !.fees = 0]]
+                                       /\ governance_to_ledger' = Append(governance_to_ledger, request(self, OP_TRANSFER, (transfer(neuron'[source_neuron_id[self]].account,
+                                                                                                                               neuron'[target_neuron_id[self]].account,
+                                                                                                                               (neuron'[source_neuron_id[self]].cached_stake - neuron'[source_neuron_id[self]].fees) - TRANSACTION_FEE,
+                                                                                                                               TRANSACTION_FEE))))
                                        /\ pc' = [pc EXCEPT ![self] = "MergeNeurons3"]
-                       /\ UNCHANGED << neuron, neuron_id_by_account, locks, 
+                       /\ UNCHANGED << neuron_id_by_account, locks, 
                                        neuron_count, total_rewards, minted, 
                                        burned, account_id_, neuron_id_, 
-                                       account_id, neuron_id_R, neuron_id_D, 
-                                       amount_, to_account, rewards_amount, 
-                                       fees_amount, error, parent_neuron_id_, 
+                                       account_id, neuron_id_R, neuron_id, 
+                                       amount_, to_account, fees_amount_, 
+                                       error, parent_neuron_id_, 
                                        child_neuron_id_, child_stake, 
                                        child_account_id_, parent_neuron_id_D, 
                                        disburse_amount, child_account_id_D, 
-                                       child_neuron_id_D, neuron_id, 
-                                       maturity_to_merge, parent_neuron_id, 
+                                       child_neuron_id_D, parent_neuron_id, 
                                        amount, child_neuron_id, 
                                        child_account_id, source_neuron_id, 
-                                       target_neuron_id, target_balance, 
-                                       balances, nr_transfers >>
+                                       target_neuron_id, fees_amount, 
+                                       target_balance, balances, nr_transfers >>
 
 MergeNeurons3(self) == /\ pc[self] = "MergeNeurons3"
+                       /\ \E answer \in { resp \in ledger_to_governance: resp.caller = self}:
+                            /\ ledger_to_governance' = ledger_to_governance \ {answer}
+                            /\ IF answer.response_value.status = TRANSFER_FAIL
+                                  THEN /\ pc' = [pc EXCEPT ![self] = "MergeNeurons6"]
+                                       /\ UNCHANGED governance_to_ledger
+                                  ELSE /\ governance_to_ledger' = Append(governance_to_ledger, request(self, OP_QUERY_BALANCE, (balance_query(neuron[target_neuron_id[self]].account))))
+                                       /\ pc' = [pc EXCEPT ![self] = "MergeNeurons4"]
+                       /\ UNCHANGED << neuron, neuron_id_by_account, locks, 
+                                       neuron_count, total_rewards, minted, 
+                                       burned, account_id_, neuron_id_, 
+                                       account_id, neuron_id_R, neuron_id, 
+                                       amount_, to_account, fees_amount_, 
+                                       error, parent_neuron_id_, 
+                                       child_neuron_id_, child_stake, 
+                                       child_account_id_, parent_neuron_id_D, 
+                                       disburse_amount, child_account_id_D, 
+                                       child_neuron_id_D, parent_neuron_id, 
+                                       amount, child_neuron_id, 
+                                       child_account_id, source_neuron_id, 
+                                       target_neuron_id, fees_amount, 
+                                       target_balance, balances, nr_transfers >>
+
+MergeNeurons4(self) == /\ pc[self] = "MergeNeurons4"
                        /\ \E r \in { r2 \in ledger_to_governance : r2.caller = self }:
                             LET b == r.response_value.bal IN
                               /\ ledger_to_governance' = ledger_to_governance \ {r}
                               /\ target_balance' = [target_balance EXCEPT ![self] = b]
                               /\ governance_to_ledger' = Append(governance_to_ledger, request(self, OP_QUERY_BALANCE, (balance_query(neuron[source_neuron_id[self]].account))))
-                       /\ pc' = [pc EXCEPT ![self] = "MergeNeurons4"]
+                       /\ pc' = [pc EXCEPT ![self] = "MergeNeurons5"]
                        /\ UNCHANGED << neuron, neuron_id_by_account, locks, 
                                        neuron_count, total_rewards, minted, 
                                        burned, account_id_, neuron_id_, 
-                                       account_id, neuron_id_R, neuron_id_D, 
-                                       amount_, to_account, rewards_amount, 
-                                       fees_amount, error, parent_neuron_id_, 
+                                       account_id, neuron_id_R, neuron_id, 
+                                       amount_, to_account, fees_amount_, 
+                                       error, parent_neuron_id_, 
                                        child_neuron_id_, child_stake, 
                                        child_account_id_, parent_neuron_id_D, 
                                        disburse_amount, child_account_id_D, 
-                                       child_neuron_id_D, neuron_id, 
-                                       maturity_to_merge, parent_neuron_id, 
+                                       child_neuron_id_D, parent_neuron_id, 
                                        amount, child_neuron_id, 
                                        child_account_id, source_neuron_id, 
-                                       target_neuron_id, balances, 
+                                       target_neuron_id, fees_amount, balances, 
                                        nr_transfers >>
 
-MergeNeurons4(self) == /\ pc[self] = "MergeNeurons4"
+MergeNeurons5(self) == /\ pc[self] = "MergeNeurons5"
                        /\ \E r \in { r2 \in ledger_to_governance : r2.caller = self }:
                             LET source_balance == r.response_value.bal IN
                               /\ ledger_to_governance' = ledger_to_governance \ {r}
@@ -1497,32 +1413,31 @@ MergeNeurons4(self) == /\ pc[self] = "MergeNeurons4"
                                         + (neuron[target_neuron_id[self]].cached_stake - neuron[target_neuron_id[self]].fees)
                                         - TRANSACTION_FEE)
                                     \/ source_balance /= 0
-                                    THEN /\ pc' = [pc EXCEPT ![self] = "MergeNeurons5"]
+                                    THEN /\ pc' = [pc EXCEPT ![self] = "MergeNeurons6"]
                                          /\ UNCHANGED neuron
                                     ELSE /\ neuron' =       [neuron EXCEPT
                                                       ![target_neuron_id[self]] = [@ EXCEPT !.cached_stake = @ +
                                                           (neuron[source_neuron_id[self]].cached_stake - neuron[source_neuron_id[self]].fees) - TRANSACTION_FEE,
                                                           !.maturity = @ + neuron[source_neuron_id[self]].maturity],
                                                       ![source_neuron_id[self]] = [@ EXCEPT !.cached_stake = 0, !.maturity = 0]]
-                                         /\ pc' = [pc EXCEPT ![self] = "MergeNeurons5"]
+                                         /\ pc' = [pc EXCEPT ![self] = "MergeNeurons6"]
                        /\ UNCHANGED << neuron_id_by_account, locks, 
                                        neuron_count, total_rewards, minted, 
                                        burned, governance_to_ledger, 
                                        account_id_, neuron_id_, account_id, 
-                                       neuron_id_R, neuron_id_D, amount_, 
-                                       to_account, rewards_amount, fees_amount, 
-                                       error, parent_neuron_id_, 
-                                       child_neuron_id_, child_stake, 
-                                       child_account_id_, parent_neuron_id_D, 
-                                       disburse_amount, child_account_id_D, 
-                                       child_neuron_id_D, neuron_id, 
-                                       maturity_to_merge, parent_neuron_id, 
-                                       amount, child_neuron_id, 
-                                       child_account_id, source_neuron_id, 
-                                       target_neuron_id, target_balance, 
-                                       balances, nr_transfers >>
+                                       neuron_id_R, neuron_id, amount_, 
+                                       to_account, fees_amount_, error, 
+                                       parent_neuron_id_, child_neuron_id_, 
+                                       child_stake, child_account_id_, 
+                                       parent_neuron_id_D, disburse_amount, 
+                                       child_account_id_D, child_neuron_id_D, 
+                                       parent_neuron_id, amount, 
+                                       child_neuron_id, child_account_id, 
+                                       source_neuron_id, target_neuron_id, 
+                                       fees_amount, target_balance, balances, 
+                                       nr_transfers >>
 
-MergeNeurons5(self) == /\ pc[self] = "MergeNeurons5"
+MergeNeurons6(self) == /\ pc[self] = "MergeNeurons6"
                        /\ locks' = locks \ {source_neuron_id[self], target_neuron_id[self]}
                        /\ pc' = [pc EXCEPT ![self] = "Done"]
                        /\ UNCHANGED << neuron, neuron_id_by_account, 
@@ -1530,21 +1445,20 @@ MergeNeurons5(self) == /\ pc[self] = "MergeNeurons5"
                                        burned, governance_to_ledger, 
                                        ledger_to_governance, account_id_, 
                                        neuron_id_, account_id, neuron_id_R, 
-                                       neuron_id_D, amount_, to_account, 
-                                       rewards_amount, fees_amount, error, 
-                                       parent_neuron_id_, child_neuron_id_, 
-                                       child_stake, child_account_id_, 
-                                       parent_neuron_id_D, disburse_amount, 
-                                       child_account_id_D, child_neuron_id_D, 
-                                       neuron_id, maturity_to_merge, 
-                                       parent_neuron_id, amount, 
-                                       child_neuron_id, child_account_id, 
-                                       source_neuron_id, target_neuron_id, 
+                                       neuron_id, amount_, to_account, 
+                                       fees_amount_, error, parent_neuron_id_, 
+                                       child_neuron_id_, child_stake, 
+                                       child_account_id_, parent_neuron_id_D, 
+                                       disburse_amount, child_account_id_D, 
+                                       child_neuron_id_D, parent_neuron_id, 
+                                       amount, child_neuron_id, 
+                                       child_account_id, source_neuron_id, 
+                                       target_neuron_id, fees_amount, 
                                        target_balance, balances, nr_transfers >>
 
 Merge_Neurons(self) == MergeNeurons1(self) \/ MergeNeurons2(self)
                           \/ MergeNeurons3(self) \/ MergeNeurons4(self)
-                          \/ MergeNeurons5(self)
+                          \/ MergeNeurons5(self) \/ MergeNeurons6(self)
 
 LedgerMainLoop == /\ pc[Ledger_Process_Id] = "LedgerMainLoop"
                   /\ \/ /\ (governance_to_ledger /= <<>>)
@@ -1554,7 +1468,7 @@ LedgerMainLoop == /\ pc[Ledger_Process_Id] = "LedgerMainLoop"
                                  LET caller == req.caller IN
                                    /\ governance_to_ledger' = Tail(governance_to_ledger)
                                    /\ Assert((t \in {OP_QUERY_BALANCE, OP_TRANSFER}), 
-                                             "Failure of assertion at line 724, column 21.")
+                                             "Failure of assertion at line 722, column 21.")
                                    /\ IF t = OP_QUERY_BALANCE
                                          THEN /\ ledger_to_governance' = (ledger_to_governance \union {response(caller, ([bal |-> balances[arg.of_account]]))})
                                               /\ UNCHANGED << minted, burned, 
@@ -1575,7 +1489,7 @@ LedgerMainLoop == /\ pc[Ledger_Process_Id] = "LedgerMainLoop"
                                                                                                \/ (to_acc = Minting_Account_Id /\ amnt < TRANSACTION_FEE)
                                                                                                \/ fee + amnt > balances[from_acc] IN
                                                                       /\ Assert((fee >= 0), 
-                                                                                "Failure of assertion at line 747, column 29.")
+                                                                                "Failure of assertion at line 745, column 29.")
                                                                       /\ IF is_invalid_transfer
                                                                             THEN /\ ledger_to_governance' = (ledger_to_governance \union {response(caller, ([status |-> TRANSFER_FAIL]))})
                                                                                  /\ UNCHANGED << minted, 
@@ -1606,16 +1520,15 @@ LedgerMainLoop == /\ pc[Ledger_Process_Id] = "LedgerMainLoop"
                   /\ UNCHANGED << neuron, neuron_id_by_account, locks, 
                                   neuron_count, total_rewards, account_id_, 
                                   neuron_id_, account_id, neuron_id_R, 
-                                  neuron_id_D, amount_, to_account, 
-                                  rewards_amount, fees_amount, error, 
-                                  parent_neuron_id_, child_neuron_id_, 
+                                  neuron_id, amount_, to_account, fees_amount_, 
+                                  error, parent_neuron_id_, child_neuron_id_, 
                                   child_stake, child_account_id_, 
                                   parent_neuron_id_D, disburse_amount, 
                                   child_account_id_D, child_neuron_id_D, 
-                                  neuron_id, maturity_to_merge, 
                                   parent_neuron_id, amount, child_neuron_id, 
                                   child_account_id, source_neuron_id, 
-                                  target_neuron_id, target_balance >>
+                                  target_neuron_id, fees_amount, 
+                                  target_balance >>
 
 Ledger == LedgerMainLoop
 
@@ -1630,22 +1543,20 @@ Change_Neuron_Fee1(self) == /\ pc[self] = "Change_Neuron_Fee1"
                                             governance_to_ledger, 
                                             ledger_to_governance, account_id_, 
                                             neuron_id_, account_id, 
-                                            neuron_id_R, neuron_id_D, amount_, 
-                                            to_account, rewards_amount, 
-                                            fees_amount, error, 
+                                            neuron_id_R, neuron_id, amount_, 
+                                            to_account, fees_amount_, error, 
                                             parent_neuron_id_, 
                                             child_neuron_id_, child_stake, 
                                             child_account_id_, 
                                             parent_neuron_id_D, 
                                             disburse_amount, 
                                             child_account_id_D, 
-                                            child_neuron_id_D, neuron_id, 
-                                            maturity_to_merge, 
+                                            child_neuron_id_D, 
                                             parent_neuron_id, amount, 
                                             child_neuron_id, child_account_id, 
                                             source_neuron_id, target_neuron_id, 
-                                            target_balance, balances, 
-                                            nr_transfers >>
+                                            fees_amount, target_balance, 
+                                            balances, nr_transfers >>
 
 Change_Neuron_Fee(self) == Change_Neuron_Fee1(self)
 
@@ -1662,10 +1573,9 @@ Increase_Neuron_Maturity1(self) == /\ pc[self] = "Increase_Neuron_Maturity1"
                                                    ledger_to_governance, 
                                                    account_id_, neuron_id_, 
                                                    account_id, neuron_id_R, 
-                                                   neuron_id_D, amount_, 
-                                                   to_account, rewards_amount, 
-                                                   fees_amount, error, 
-                                                   parent_neuron_id_, 
+                                                   neuron_id, amount_, 
+                                                   to_account, fees_amount_, 
+                                                   error, parent_neuron_id_, 
                                                    child_neuron_id_, 
                                                    child_stake, 
                                                    child_account_id_, 
@@ -1673,15 +1583,13 @@ Increase_Neuron_Maturity1(self) == /\ pc[self] = "Increase_Neuron_Maturity1"
                                                    disburse_amount, 
                                                    child_account_id_D, 
                                                    child_neuron_id_D, 
-                                                   neuron_id, 
-                                                   maturity_to_merge, 
                                                    parent_neuron_id, amount, 
                                                    child_neuron_id, 
                                                    child_account_id, 
                                                    source_neuron_id, 
                                                    target_neuron_id, 
-                                                   target_balance, balances, 
-                                                   nr_transfers >>
+                                                   fees_amount, target_balance, 
+                                                   balances, nr_transfers >>
 
 Increase_Neuron_Maturity(self) == Increase_Neuron_Maturity1(self)
 
@@ -1691,7 +1599,6 @@ Next == Ledger
            \/ (\E self \in Disburse_Neuron_Process_Ids: Disburse_Neuron(self))
            \/ (\E self \in Spawn_Neuron_Process_Ids: Spawn_Neuron(self))
            \/ (\E self \in Disburse_To_Neuron_Process_Ids: Disburse_To_Neuron(self))
-           \/ (\E self \in Merge_Maturity_Of_Neuron_Process_Ids: Merge_Maturity_Of_Neuron(self))
            \/ (\E self \in Split_Neuron_Process_Ids: Split_Neuron(self))
            \/ (\E self \in Merge_Neurons_Process_Ids: Merge_Neurons(self))
            \/ (\E self \in Change_Neuron_Fee_Process_Ids: Change_Neuron_Fee(self))
