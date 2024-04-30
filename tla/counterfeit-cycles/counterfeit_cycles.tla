@@ -203,8 +203,6 @@ LedgerReceiveMessage ==
    /\ Len(ledger.msgs) > 0
    
    /\ IF msg.amount > ledger.balances[msg.from] THEN
-        
-        
         /\ ledger' = [ledger EXCEPT
                \* Remove msg from queue.
                !["msgs"] = Tail(@),
