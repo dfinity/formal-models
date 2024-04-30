@@ -2,10 +2,13 @@
 EXTENDS TLC, Integers, Sequences, FiniteSets
 
 CONSTANT SUBNETS, \* The set of subnets.
-         STARTING_BALANCE_PER_SUBNET
+         STARTING_BALANCE_PER_SUBNET,
+         MAX_DISHONEST_ACTIONS
 
-VARIABLE ledger, subnets, subnetMsgs
+VARIABLE ledger, subnets, subnetMsgs, numDishonestActions
 
+TRANSFER == "transfer"
+APPROVE == "approve"
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
@@ -35,6 +38,7 @@ SubnetsInit ==
          ]
      ]
   /\ subnetMsgs = <<>>
+  /\ numDishonestActions = 0
   
 LedgerInit ==
   \* Initialize the state of the ledger.
@@ -61,7 +65,7 @@ Init ==
 
 TransferMessage ==
   \* A message to transfer cycles between subnets.
-  [type : {"transfer"}, from : SUBNETS, to : SUBNETS, amount : Nat \ {0}]
+  [type : {TRANSFER}, from : SUBNETS, to : SUBNETS, amount : Nat \ {0}]
 
 \* The set of all possible messages that are sent/received by subnets.
 SubnetMessages ==
@@ -72,7 +76,7 @@ SubnetMessages ==
   \* Approving a cycles transfer.
   \* This message is sent by the ledger to indicate that the `amount` sent is
   \* now finalized.
-  [type : {"approve"}, from : SUBNETS, to : SUBNETS, amount : Nat \ {0}]  
+  [type : {APPROVE}, from : SUBNETS, to : SUBNETS, amount : Nat \ {0}]  
 
 LedgerMessages ==
   \* The set of all possible messages that can be received by the Ledger.
@@ -109,52 +113,51 @@ SubnetSendTransfer ==
   
   \* Choose two subnets.
   \E sender, receiver \in SUBNETS: sender /= receiver
-  /\ subnets[sender].balance > 0
   
-  \* Choose an amount that's within the subnet's balance.
-  /\ \E amount \in 1..subnets[sender].balance:
-  
-  \* Send a transfer to the receiver.
-  /\ subnetMsgs' = Append(subnetMsgs, [
-        type |-> "transfer",
-        from |-> sender,
-        to |-> receiver,
-        amount |-> amount
-     ])
-     
-  \* Subtract amount from sender's balance.
-  /\ subnets' = [subnets EXCEPT ![sender].balance = @ - amount]
-  
-  /\ UNCHANGED<<ledger>>
+    \* Choose an amount that's within the subnet's balance.
+    /\ \E amount \in 1..subnets[sender].balance:
+    
+        \* Send a transfer to the receiver.
+        /\ subnetMsgs' = Append(subnetMsgs, [
+                type |-> TRANSFER,
+                from |-> sender,
+                to |-> receiver,
+                amount |-> amount
+            ])
+            
+        \* Subtract amount from sender's balance.
+        /\ subnets' = [subnets EXCEPT ![sender].balance = @ - amount]
+        
+        /\ UNCHANGED<<ledger, numDishonestActions>>
 
 SubnetDishonestSendTransfer ==
   (* Maliciously transfers more cycles than the subnet's own balance. *)
   
-  \E sender, receiver \in SUBNETS: sender /= receiver
-
-  \* To keep the state space bounded, a subnet can make a dishonest
-  \* transfer at most once.
-  /\ subnets[sender].honest
+  \E sender, receiver \in SUBNETS: sender /= receiver 
   
-  \* Send a transfer to the receiver.
-  /\ subnetMsgs' = Append(subnetMsgs, [
-        type |-> "transfer",
-        from |-> sender,
-        to |-> receiver,
-        \* Choose an amount that's greater than the balance.
-        amount |-> subnets[sender].balance + 10
-  ])
-  
-  \* Mark subnet as dishonest to avoid repeating this transfer again.
-  /\ subnets' = [subnets EXCEPT ![sender].honest = FALSE]
-  
-  /\ UNCHANGED<<ledger>>
+    \* Limit the number of dishonest actions to keep the state space bounded.  
+    /\ numDishonestActions < MAX_DISHONEST_ACTIONS
+    /\ numDishonestActions' = numDishonestActions + 1
+    
+    \* Send a transfer to the receiver.
+    /\ subnetMsgs' = Append(subnetMsgs, [
+            type |-> TRANSFER,
+            from |-> sender,
+            to |-> receiver,
+            \* Choose an amount that's greater than the balance.
+            amount |-> subnets[sender].balance + 10
+    ])
+    
+    \* Mark subnet as dishonest to avoid repeating this transfer again.
+    /\ subnets' = [subnets EXCEPT ![sender].honest = FALSE]
+    
+    /\ UNCHANGED<<ledger>>
 
 
 SubnetReceiveTransfer ==
   /\ Len(subnetMsgs) > 0
   /\ LET msg == Head(subnetMsgs) IN
-      /\ msg.type = "transfer"
+      /\ msg.type = TRANSFER
       /\ subnets' = [
                          \* Add amount in transfer to the unfinalized balance.
           subnets EXCEPT ![msg.to].unfinalized[msg.from] = @ + msg.amount,
@@ -163,32 +166,32 @@ SubnetReceiveTransfer ==
          ]
       \* Remove message from subnet messages.
       /\ subnetMsgs' = Tail(subnetMsgs)
-      /\ UNCHANGED<<ledger>>
+      /\ UNCHANGED<<ledger, numDishonestActions>>
       
 LedgerPoll ==
   \E s \in SUBNETS: Len(subnets[s].msgsToLedger) > 0
     /\ LET msg == Head(subnets[s].msgsToLedger) IN
       \* Send message to ledger.
       /\ ledger' = [ledger EXCEPT !["msgs"] = Append(@,
-          [type |-> "transfer", from |-> msg.from, to |-> msg.to, amount |-> msg.amount]
+          [type |-> TRANSFER, from |-> msg.from, to |-> msg.to, amount |-> msg.amount]
         )]
       \* Remove message from the queue.
       /\ subnets' = [
             subnets EXCEPT ![s].msgsToLedger = Tail(@)
          ]
-      /\ UNCHANGED<<subnetMsgs>>
+      /\ UNCHANGED<<subnetMsgs, numDishonestActions>>
 
 SubnetReceiveApprove == 
   /\ Len(subnetMsgs) > 0
   /\ LET msg == Head(subnetMsgs) IN
-      msg.type = "approve"
+      msg.type = APPROVE
       /\ subnets' = [
         subnets EXCEPT ![msg.to].unfinalized[msg.from] = @ - msg.amount,
                        ![msg.to].balance = @ + msg.amount
       ]
       \* Remove message from subnet messages.
       /\ subnetMsgs' = Tail(subnetMsgs)
-      /\ UNCHANGED<<ledger>>
+      /\ UNCHANGED<<ledger, numDishonestActions>>
 
 LedgerReceiveMessage ==
   \* If a message is there and the balance checks out, then update it and
@@ -209,7 +212,7 @@ LedgerReceiveMessage ==
                \* Subnet spent more than it has. Mark it as a bad subnet.
                !["dishonestSubnets"] = @ \union {msg.from}
            ]
-        /\ UNCHANGED<<subnets, subnetMsgs>>
+        /\ UNCHANGED<<subnets, subnetMsgs, numDishonestActions>>
       ELSE
         /\ ledger' = [
             ledger EXCEPT
@@ -221,9 +224,9 @@ LedgerReceiveMessage ==
               !["msgs"] = Tail(@)
             ]
         /\ subnetMsgs'= Append(subnetMsgs,
-            [type |-> "approve", from |-> msg.from, to |-> msg.to, amount |-> msg.amount]
+            [type |-> APPROVE, from |-> msg.from, to |-> msg.to, amount |-> msg.amount]
            )
-        /\ UNCHANGED<<subnets>>
+        /\ UNCHANGED<<subnets, numDishonestActions>>
 
 Next ==
   \/ SubnetSendTransfer
@@ -289,5 +292,5 @@ LedgerAndSubnetBalancesMatchAfterMsgProcessing ==
 
 =============================================================================
 \* Modification History
-\* Last modified Mon Apr 15 06:14:14 EET 2024 by ielashi
+\* Last modified Wed Apr 24 14:45:00 EET 2024 by ielashi
 \* Created Wed Mar 27 13:39:53 CET 2024 by ielashi
