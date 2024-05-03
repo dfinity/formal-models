@@ -52,11 +52,7 @@ LedgerInit ==
     balances |-> [s \in SUBNETS |-> STARTING_BALANCE_PER_SUBNET],
     
     \* The queue of messages to be processed.
-    msgs |-> [s \in SUBNETS |-> <<>>],
-    
-    \* The set of subnets that the ledger thinks is dishonest.
-    \* NOTE: I think this is redundant and is not needed for this model.
-    dishonestSubnets |-> {}
+    msgs |-> [s \in SUBNETS |-> <<>>]
   ]
 
 Init ==
@@ -100,7 +96,6 @@ LedgerTypesOK ==
   \* Type-correctness invariant.
   /\ DOMAIN ledger.balances = SUBNETS
   /\ \A s \in SUBNETS: ledger.balances[s] >= 0
-  /\ ledger.dishonestSubnets \subseteq SUBNETS
   /\ \A i \in DOMAIN ledger.msgs: {ledger.msgs[i]} \subseteq LedgerMessages
 
 TypesOK ==
@@ -203,39 +198,36 @@ SubnetReceiveApprove ==
       /\ subnetMsgs' = subnetMsgs \ {msg}
       /\ UNCHANGED<<ledger, numDishonestActions, numTransfers>>
 
-LedgerReceiveMessage ==
-  \* If a message is there and the balance checks out, then update it and
-  \* send approval to the subnet. If they don't check out, add sender to
-  \* the dishonestSubnets set and don't update balances.
+LedgerReceiveTransferMessage ==
+  \* If a transfer message is received and there is enough balance, then update the
+  \* balances and send the approval to the subnet.
   \E s \in SUBNETS: Len(ledger.msgs[s]) > 0
     /\ LET msg == Head(ledger.msgs[s]) IN
-        /\ IF msg.amount > ledger.balances[msg.from] THEN
-            /\ ledger' = [ledger EXCEPT
-                \* Remove msg from queue.
-                !["msgs"][s] = Tail(@),
-                
-                \* Subnet spent more than it has. Mark it as a dishonest subnet.
-                !["dishonestSubnets"] = @ \union {msg.from}]
-            /\ UNCHANGED<<subnets, subnetMsgs, numDishonestActions, numTransfers>>
-            ELSE
-            /\ ledger' = [
-                ledger EXCEPT
-                \* Transaction is valid. Update ledger balances.
-                !["balances"][msg.from] = @ - msg.amount,
-                !["balances"][msg.to] = @ + msg.amount,
-                
-                \* Remove msg from queue.
-                !["msgs"][s] = Tail(@)]
-            /\ subnetMsgs'= subnetMsgs \union
-                {[id |-> msg.id, type |-> APPROVE, from |-> msg.from, to |-> msg.to, amount |-> msg.amount]}
-            /\ UNCHANGED<<subnets, numDishonestActions, numTransfers>>
+        /\ msg.type = TRANSFER
+        /\ msg.amount <= ledger.balances[msg.from]
+        /\ ledger' = [
+            ledger EXCEPT
+            \* Transaction is valid. Update ledger balances.
+            !["balances"][msg.from] = @ - msg.amount,
+            !["balances"][msg.to] = @ + msg.amount,
+            
+            \* Remove msg from queue.
+            !["msgs"][s] = Tail(@)]
+        /\ subnetMsgs'= subnetMsgs \union {[
+            id |-> msg.id,
+            type |-> APPROVE,
+            from |-> msg.from,
+            to |-> msg.to,
+            amount |-> msg.amount
+            ]}
+        /\ UNCHANGED<<subnets, numDishonestActions, numTransfers>>
 
 Next ==
   \/ SubnetSendTransfer
   \/ SubnetReceiveTransfer
   \/ SubnetReceiveApprove
   \/ SubnetDishonestSendTransfer
-  \/ LedgerReceiveMessage
+  \/ LedgerReceiveTransferMessage
   \/ LedgerPoll
 
 BalancesNonNegative ==
@@ -243,16 +235,6 @@ BalancesNonNegative ==
   (* Invariant to ensure that all subnet balances are non-negative.        *)
   (*************************************************************************)
   \A s \in SUBNETS: subnets[s].balance >= 0
-
-LedgerIdentifiesAllDishonestSubnets ==
-  {s \in SUBNETS: ~subnets[s].honest} = ledger.dishonestSubnets
-
-LedgerIdentifiesAllDishonestSubnetsEventually ==
-  \* A temporal property ensuring that all dishonest subnets are,
-  \* eventually, identified by the ledger.
-  \*
-  \* NOTE: I think this invariant is not relevant anymore and can be removed.
-  <>[][LedgerIdentifiesAllDishonestSubnets]_<<subnets, subnetMsgs, ledger, numDishonestActions, numTransfers>>
 
 RECURSIVE RecordToSeq(_,_)
 RecordToSeq(f, ks) ==
