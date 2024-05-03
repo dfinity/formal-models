@@ -288,6 +288,3 @@ LedgerAndSubnetBalancesMatchAfterMsgProcessing ==
   => \A sn \in SUBNETS: ledger.balances[sn] = subnets[sn].balance
 
 =============================================================================
-\* Modification History
-\* Last modified Wed Apr 24 14:45:00 EET 2024 by ielashi
-\* Created Wed Mar 27 13:39:53 CET 2024 by ielashi
