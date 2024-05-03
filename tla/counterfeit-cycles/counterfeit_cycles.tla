@@ -70,7 +70,7 @@ Init ==
 
 TransferMessage ==
   \* A message to transfer cycles between subnets.
-  [type : {TRANSFER}, from : SUBNETS, to : SUBNETS, amount : Nat \ {0}]
+  [id: Nat, type : {TRANSFER}, from : SUBNETS, to : SUBNETS, amount : Nat \ {0}]
 
 \* The set of all possible messages that are sent/received by subnets.
 SubnetMessages ==
@@ -125,6 +125,7 @@ SubnetSendTransfer ==
     
         \* Send a transfer to the receiver.
         /\ subnetMsgs' = Append(subnetMsgs, [
+                id |-> numTransfers,
                 type |-> TRANSFER,
                 from |-> sender,
                 to |-> receiver,
@@ -151,6 +152,7 @@ SubnetDishonestSendTransfer ==
 
     \* Send a transfer to the receiver.
     /\ subnetMsgs' = Append(subnetMsgs, [
+            id |-> numTransfers,
             type |-> TRANSFER,
             from |-> sender,
             to |-> receiver,
