@@ -148,7 +148,7 @@ SubnetDishonestSendTransfer ==
             amount |-> subnets[sender].balance + 10
     ])
     
-    \* Mark subnet as dishonest to avoid repeating this transfer again.
+    \* Mark subnet as dishonest.
     /\ subnets' = [subnets EXCEPT ![sender].honest = FALSE]
     
     /\ UNCHANGED<<ledger>>
@@ -239,7 +239,6 @@ BalancesNonNegative ==
   (* Invariant to ensure that all subnet balances are non-negative.        *)
   (*************************************************************************)
   \A s \in SUBNETS: subnets[s].balance >= 0
-
 
 LedgerIdentifiesAllDishonestSubnets ==
   {s \in SUBNETS: ~subnets[s].honest} = ledger.dishonestSubnets
