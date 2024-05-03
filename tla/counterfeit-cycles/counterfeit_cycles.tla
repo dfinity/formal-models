@@ -7,6 +7,7 @@ CONSTANT SUBNETS, \* The set of subnets.
 
 VARIABLE ledger, subnets, subnetMsgs, numDishonestActions
 
+TOTAL_SUPPLY == STARTING_BALANCE_PER_SUBNET * Cardinality(SUBNETS)
 TRANSFER == "transfer"
 APPROVE == "approve"
 
@@ -72,7 +73,7 @@ SubnetMessages ==
   \* Transferring cycles from one subnet to another.
   TransferMessage
     \union
-    
+
   \* Approving a cycles transfer.
   \* This message is sent by the ledger to indicate that the `amount` sent is
   \* now finalized.
@@ -97,7 +98,7 @@ LedgerTypesOK ==
   /\ \A s \in SUBNETS: ledger.balances[s] >= 0
   /\ ledger.dishonestSubnets \subseteq SUBNETS
   /\ \A i \in DOMAIN ledger.msgs: {ledger.msgs[i]} \subseteq LedgerMessages
-  
+
 TypesOK ==
   \* Type-correctness invariant.
   /\ LedgerTypesOK
@@ -124,21 +125,20 @@ SubnetSendTransfer ==
                 to |-> receiver,
                 amount |-> amount
             ])
-            
+
         \* Subtract amount from sender's balance.
         /\ subnets' = [subnets EXCEPT ![sender].balance = @ - amount]
-        
+
         /\ UNCHANGED<<ledger, numDishonestActions>>
 
 SubnetDishonestSendTransfer ==
   (* Maliciously transfers more cycles than the subnet's own balance. *)
-  
   \E sender, receiver \in SUBNETS: sender /= receiver 
-  
+
     \* Limit the number of dishonest actions to keep the state space bounded.  
     /\ numDishonestActions < MAX_DISHONEST_ACTIONS
     /\ numDishonestActions' = numDishonestActions + 1
-    
+
     \* Send a transfer to the receiver.
     /\ subnetMsgs' = Append(subnetMsgs, [
             type |-> TRANSFER,
@@ -147,10 +147,10 @@ SubnetDishonestSendTransfer ==
             \* Choose an amount that's greater than the balance.
             amount |-> subnets[sender].balance + 10
     ])
-    
+
     \* Mark subnet as dishonest.
     /\ subnets' = [subnets EXCEPT ![sender].honest = FALSE]
-    
+
     /\ UNCHANGED<<ledger>>
 
 
@@ -270,9 +270,9 @@ SumBalance(s) ==
 
 NoFakeCyclesAreCreated ==
   \* The total supply of finalized cycles in the ledger remains constant.
-  /\ SumSeq(RecordToSeq(ledger.balances, SUBNETS)) = STARTING_BALANCE_PER_SUBNET * Cardinality(SUBNETS)
+  /\ SumSeq(RecordToSeq(ledger.balances, SUBNETS)) = TOTAL_SUPPLY
   \* The total supply of cycles that each subnet thinks it has is capped.
-  /\ SumBalance(RecordToSeq(subnets, SUBNETS)) <= STARTING_BALANCE_PER_SUBNET * Cardinality(SUBNETS)
+  /\ SumBalance(RecordToSeq(subnets, SUBNETS)) <= TOTAL_SUPPLY
 
 SubnetNeverHasMoreBalanceThanLedger ==
   \* The subnet's true balance is at most the balance stored in the ledger
