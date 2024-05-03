@@ -48,7 +48,7 @@ LedgerInit ==
     balances |-> [s \in SUBNETS |-> STARTING_BALANCE_PER_SUBNET],
     
     \* The queue of messages to be processed.
-    msgs |-> <<>>,
+    msgs |-> [s \in SUBNETS |-> <<>>],
     
     \* The set of subnets that the ledger thinks is dishonest.
     \* NOTE: I think this is redundant and is not needed for this model.
@@ -172,7 +172,7 @@ LedgerPoll ==
   \E s \in SUBNETS: Len(subnets[s].msgsToLedger) > 0
     /\ LET msg == Head(subnets[s].msgsToLedger) IN
       \* Send message to ledger.
-      /\ ledger' = [ledger EXCEPT !["msgs"] = Append(@,
+      /\ ledger' = [ledger EXCEPT !["msgs"][s] = Append(@,
           [type |-> TRANSFER, from |-> msg.from, to |-> msg.to, amount |-> msg.amount]
         )]
       \* Remove message from the queue.
@@ -197,34 +197,28 @@ LedgerReceiveMessage ==
   \* If a message is there and the balance checks out, then update it and
   \* send approval to the subnet. If they don't check out, add sender to
   \* the dishonestSubnets set and don't update balances.
-  LET
-    msg == Head(ledger.msgs)
-  IN
-   /\ Len(ledger.msgs) > 0
-   
-   /\ IF msg.amount > ledger.balances[msg.from] THEN
-        /\ ledger' = [ledger EXCEPT
-               \* Remove msg from queue.
-               !["msgs"] = Tail(@),
-               
-               \* Subnet spent more than it has. Mark it as a bad subnet.
-               !["dishonestSubnets"] = @ \union {msg.from}
-           ]
-        /\ UNCHANGED<<subnets, subnetMsgs, numDishonestActions>>
-      ELSE
-        /\ ledger' = [
-            ledger EXCEPT
-              \* Transaction is valid. Update ledger balances.
-              !["balances"][msg.from] = @ - msg.amount,
-              !["balances"][msg.to] = @ + msg.amount,
-              
-              \* Remove msg from queue.
-              !["msgs"] = Tail(@)
-            ]
-        /\ subnetMsgs'= Append(subnetMsgs,
-            [type |-> APPROVE, from |-> msg.from, to |-> msg.to, amount |-> msg.amount]
-           )
-        /\ UNCHANGED<<subnets, numDishonestActions>>
+  \E s \in SUBNETS: Len(ledger.msgs[s]) > 0
+    /\ LET msg == Head(ledger.msgs[s]) IN
+        /\ IF msg.amount > ledger.balances[msg.from] THEN
+            /\ ledger' = [ledger EXCEPT
+                \* Remove msg from queue.
+                !["msgs"][s] = Tail(@),
+                
+                \* Subnet spent more than it has. Mark it as a dishonest subnet.
+                !["dishonestSubnets"] = @ \union {msg.from}]
+            /\ UNCHANGED<<subnets, subnetMsgs, numDishonestActions>>
+            ELSE
+            /\ ledger' = [
+                ledger EXCEPT
+                \* Transaction is valid. Update ledger balances.
+                !["balances"][msg.from] = @ - msg.amount,
+                !["balances"][msg.to] = @ + msg.amount,
+                
+                \* Remove msg from queue.
+                !["msgs"][s] = Tail(@)]
+            /\ subnetMsgs'= Append(subnetMsgs,
+                [type |-> APPROVE, from |-> msg.from, to |-> msg.to, amount |-> msg.amount])
+            /\ UNCHANGED<<subnets, numDishonestActions>>
 
 Next ==
   \/ SubnetSendTransfer
@@ -282,7 +276,7 @@ SubnetNeverHasMoreBalanceThanLedger ==
 LedgerAndSubnetBalancesMatchAfterMsgProcessing ==
   \* Ledger and subnets have the same balances whenever all messages are
   \* processed.
-  Len(ledger.msgs) = 0
+  /\ (\A s \in SUBNETS: Len(ledger.msgs[s]) = 0)
     /\ (\A s \in SUBNETS: Len(subnets[s].msgsToLedger) = 0)
     /\ Len(subnetMsgs) = 0
   => \A sn \in SUBNETS: ledger.balances[sn] = subnets[sn].balance
