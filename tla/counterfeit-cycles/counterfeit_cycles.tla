@@ -41,7 +41,7 @@ SubnetsInit ==
              honest |-> TRUE
          ]
      ]
-  /\ subnetMsgs = <<>>
+  /\ subnetMsgs = {}
   /\ numDishonestActions = 0
   /\ numTransfers = 0
   
@@ -81,14 +81,14 @@ SubnetMessages ==
   \* Approving a cycles transfer.
   \* This message is sent by the ledger to indicate that the `amount` sent is
   \* now finalized.
-  [type : {APPROVE}, from : SUBNETS, to : SUBNETS, amount : Nat \ {0}]  
+  [id: Nat, type : {APPROVE}, from : SUBNETS, to : SUBNETS, amount : Nat \ {0}]
 
 LedgerMessages ==
   \* The set of all possible messages that can be received by the Ledger.
   TransferMessage
 
 SubnetsTypeOK ==
-  /\ \A i \in DOMAIN subnetMsgs: {subnetMsgs[i]} \subseteq SubnetMessages
+  /\ \A s \in subnetMsgs: s \in SubnetMessages
   /\ subnets \in [SUBNETS -> [
         balance: Nat,
         unfinalized: [SUBNETS -> Nat],
@@ -124,13 +124,13 @@ SubnetSendTransfer ==
     /\ \E amount \in 1..subnets[sender].balance:
     
         \* Send a transfer to the receiver.
-        /\ subnetMsgs' = Append(subnetMsgs, [
+        /\ subnetMsgs' = subnetMsgs \union {[
                 id |-> numTransfers,
                 type |-> TRANSFER,
                 from |-> sender,
                 to |-> receiver,
                 amount |-> amount
-            ])
+            ]}
 
         \* Subtract amount from sender's balance.
         /\ subnets' = [subnets EXCEPT ![sender].balance = @ - amount]
@@ -151,14 +151,14 @@ SubnetDishonestSendTransfer ==
     /\ numTransfers' = numTransfers + 1
 
     \* Send a transfer to the receiver.
-    /\ subnetMsgs' = Append(subnetMsgs, [
+    /\ subnetMsgs' = subnetMsgs \union {[
             id |-> numTransfers,
             type |-> TRANSFER,
             from |-> sender,
             to |-> receiver,
             \* Choose an amount that's greater than the balance.
             amount |-> subnets[sender].balance + 10
-    ])
+    ]}
 
     \* Mark subnet as dishonest.
     /\ subnets' = [subnets EXCEPT ![sender].honest = FALSE]
@@ -167,9 +167,8 @@ SubnetDishonestSendTransfer ==
 
 
 SubnetReceiveTransfer ==
-  /\ Len(subnetMsgs) > 0
-  /\ LET msg == Head(subnetMsgs) IN
-      /\ msg.type = TRANSFER
+  \E msg \in subnetMsgs:
+      msg.type = TRANSFER
       /\ subnets' = [
                          \* Add amount in transfer to the unfinalized balance.
           subnets EXCEPT ![msg.to].unfinalized[msg.from] = @ + msg.amount,
@@ -177,7 +176,7 @@ SubnetReceiveTransfer ==
                          ![msg.to].msgsToLedger = Append(@, msg)
          ]
       \* Remove message from subnet messages.
-      /\ subnetMsgs' = Tail(subnetMsgs)
+      /\ subnetMsgs' = subnetMsgs \ {msg}
       /\ UNCHANGED<<ledger, numDishonestActions, numTransfers>>
       
 LedgerPoll ==
@@ -185,7 +184,7 @@ LedgerPoll ==
     /\ LET msg == Head(subnets[s].msgsToLedger) IN
       \* Send message to ledger.
       /\ ledger' = [ledger EXCEPT !["msgs"][s] = Append(@,
-          [type |-> TRANSFER, from |-> msg.from, to |-> msg.to, amount |-> msg.amount]
+          [id |-> msg.id, type |-> TRANSFER, from |-> msg.from, to |-> msg.to, amount |-> msg.amount]
         )]
       \* Remove message from the queue.
       /\ subnets' = [
@@ -194,15 +193,14 @@ LedgerPoll ==
       /\ UNCHANGED<<subnetMsgs, numDishonestActions, numTransfers>>
 
 SubnetReceiveApprove == 
-  /\ Len(subnetMsgs) > 0
-  /\ LET msg == Head(subnetMsgs) IN
+  \E msg \in subnetMsgs:
       msg.type = APPROVE
       /\ subnets' = [
         subnets EXCEPT ![msg.to].unfinalized[msg.from] = @ - msg.amount,
                        ![msg.to].balance = @ + msg.amount
       ]
       \* Remove message from subnet messages.
-      /\ subnetMsgs' = Tail(subnetMsgs)
+      /\ subnetMsgs' = subnetMsgs \ {msg}
       /\ UNCHANGED<<ledger, numDishonestActions, numTransfers>>
 
 LedgerReceiveMessage ==
@@ -228,8 +226,8 @@ LedgerReceiveMessage ==
                 
                 \* Remove msg from queue.
                 !["msgs"][s] = Tail(@)]
-            /\ subnetMsgs'= Append(subnetMsgs,
-                [type |-> APPROVE, from |-> msg.from, to |-> msg.to, amount |-> msg.amount])
+            /\ subnetMsgs'= subnetMsgs \union
+                {[id |-> msg.id, type |-> APPROVE, from |-> msg.from, to |-> msg.to, amount |-> msg.amount]}
             /\ UNCHANGED<<subnets, numDishonestActions, numTransfers>>
 
 Next ==
@@ -254,7 +252,7 @@ LedgerIdentifiesAllDishonestSubnetsEventually ==
   \* eventually, identified by the ledger.
   \*
   \* NOTE: I think this invariant is not relevant anymore and can be removed.
-  <>[][LedgerIdentifiesAllDishonestSubnets]_<<subnets, subnetMsgs, ledger>>
+  <>[][LedgerIdentifiesAllDishonestSubnets]_<<subnets, subnetMsgs, ledger, numDishonestActions, numTransfers>>
 
 RECURSIVE RecordToSeq(_,_)
 RecordToSeq(f, ks) ==
@@ -290,7 +288,7 @@ LedgerAndSubnetBalancesMatchAfterMsgProcessing ==
   \* processed.
   /\ (\A s \in SUBNETS: Len(ledger.msgs[s]) = 0)
     /\ (\A s \in SUBNETS: Len(subnets[s].msgsToLedger) = 0)
-    /\ Len(subnetMsgs) = 0
+    /\ Cardinality(subnetMsgs) = 0
   => \A sn \in SUBNETS: ledger.balances[sn] = subnets[sn].balance
 
 =============================================================================
