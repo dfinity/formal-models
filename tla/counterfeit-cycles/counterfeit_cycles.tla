@@ -1,5 +1,5 @@
 ------------------------- MODULE counterfeit_cycles -------------------------
-EXTENDS TLC, Integers, Sequences, FiniteSets
+EXTENDS TLC, Integers, Sequences, SequencesExt, FiniteSets
 
 CONSTANT SUBNETS, \* The set of subnets.
          STARTING_BALANCE_PER_SUBNET,
@@ -101,7 +101,7 @@ LedgerTypesOK ==
   \* Type-correctness invariant.
   /\ DOMAIN ledger.balances = SUBNETS
   /\ \A s \in SUBNETS: ledger.balances[s] >= 0
-  /\ \A i \in DOMAIN ledger.msgs: {ledger.msgs[i]} \subseteq LedgerMessages
+  /\ \A i \in DOMAIN ledger.msgs: ToSet(ledger.msgs[i]) \subseteq LedgerMessages
 
 TypesOK ==
   \* Type-correctness invariant.
