@@ -1,5 +1,5 @@
 ------------------------- MODULE counterfeit_cycles -------------------------
-EXTENDS TLC, Integers, Sequences, SequencesExt, FiniteSets
+EXTENDS TLC, Integers, Sequences, SequencesExt, FiniteSets, FiniteSetsExt
 
 CONSTANT SUBNETS, \* The set of subnets.
          STARTING_BALANCE_PER_SUBNET,
@@ -91,7 +91,7 @@ LedgerMessages ==
 SubnetsTypeOK ==
   /\ \A s \in subnetMsgs: s \in SubnetMessages
   /\ subnets \in [SUBNETS -> [
-        balance: Nat,
+        balance: Int,
         unfinalized: [SUBNETS -> Nat],
         msgsToLedger: Seq(LedgerMessages),
         honest: {TRUE, FALSE}
@@ -150,20 +150,22 @@ SubnetDishonestSendTransfer ==
     /\ numDishonestActions' = numDishonestActions + 1
     /\ numTransfers' = numTransfers + 1
 
-    \* Send a transfer to the receiver.
-    /\ subnetMsgs' = subnetMsgs \union {[
-            id |-> numTransfers,
-            type |-> TRANSFER,
-            from |-> sender,
-            to |-> receiver,
-            \* Choose an amount that's greater than the balance.
-            amount |-> subnets[sender].balance + 10
-    ]}
+    \* Choose an amount that's greater than the balance.
+    /\ LET amount == Max({subnets[sender].balance + 10, 1}) IN
+        \* Send a transfer to the receiver.
+        /\ subnetMsgs' = subnetMsgs \union {[
+                id |-> numTransfers,
+                type |-> TRANSFER,
+                from |-> sender,
+                to |-> receiver,
+                amount |-> amount
+            ]}
 
-    \* Mark subnet as dishonest.
-    /\ subnets' = [subnets EXCEPT ![sender].honest = FALSE]
+        \* Mark subnet as dishonest and subtract balance.
+        /\ subnets' = [subnets EXCEPT ![sender].honest = FALSE,
+                                      ![sender].balance = @ - amount]
 
-    /\ UNCHANGED<<ledger>>
+        /\ UNCHANGED<<ledger>>
 
 
 SubnetReceiveTransfer ==
@@ -231,7 +233,7 @@ Idle ==
     \* Do nothing.
     \* Once the maximum number of transfers is reached, the system is idle.
     \* This is added to prevent TLA from thinking that it's stuck in a deadlock.
-    /\ numTransfers >= MAX_TRANSFERS
+    /\ (numTransfers >= MAX_TRANSFERS \/ numDishonestActions >= MAX_DISHONEST_TRANSFERS)
     /\ UNCHANGED<<ledger, subnets, subnetMsgs, numDishonestActions, numTransfers>>
 
 Next ==
@@ -267,9 +269,10 @@ SumBalance(s) ==
   IF Len(s) = 0 THEN 0
   ELSE Head(s).balance + SumBalance(Tail(s))
 
+TotalSupplyInLedgerRemainsConstant ==
+    SumSeq(RecordToSeq(ledger.balances, SUBNETS)) = TOTAL_SUPPLY
+
 NoFakeCyclesAreCreated ==
-  \* The total supply of finalized cycles in the ledger remains constant.
-  /\ SumSeq(RecordToSeq(ledger.balances, SUBNETS)) = TOTAL_SUPPLY
   \* The total supply of cycles that each subnet thinks it has is capped.
   /\ SumBalance(RecordToSeq(subnets, SUBNETS)) <= TOTAL_SUPPLY
 
@@ -278,6 +281,7 @@ SubnetNeverHasMoreBalanceThanLedger ==
   \* for that subnet.
   \A s \in SUBNETS: subnets[s].balance <= ledger.balances[s]
 
+\* TODO: is this invariant evaluated ever?
 LedgerAndSubnetBalancesMatchAfterMsgProcessing ==
   \* Ledger and subnets have the same balances whenever all messages are
   \* processed.
