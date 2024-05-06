@@ -4,7 +4,8 @@ EXTENDS TLC, Integers, Sequences, SequencesExt, FiniteSets, FiniteSetsExt
 CONSTANT SUBNETS, \* The set of subnets.
          STARTING_BALANCE_PER_SUBNET,
          MAX_DISHONEST_TRANSFERS,
-         MAX_TRANSFERS
+         MAX_TRANSFERS,
+         MAX_COUNTERFEIT_CYCLES
 
 ASSUME MAX_TRANSFERS >= MAX_DISHONEST_TRANSFERS
 
@@ -141,32 +142,33 @@ SubnetSendTransfer ==
         /\ UNCHANGED<<ledger, numDishonestActions>>
 
 SubnetDishonestSendTransfer ==
-  (* Maliciously transfers more cycles than the subnet's own balance. *)
-  numTransfers < MAX_TRANSFERS
-  /\ numDishonestActions < MAX_DISHONEST_TRANSFERS
-  /\ \E sender, receiver \in SUBNETS: sender /= receiver
+    (* Maliciously transfers more cycles than the subnet's own balance. *)
+    numTransfers < MAX_TRANSFERS
+    /\ numDishonestActions < MAX_DISHONEST_TRANSFERS
+    /\ \E sender, receiver \in SUBNETS:
+        /\ sender /= receiver
 
-    \* Limit the number of dishonest actions to keep the state space bounded.
-    /\ numDishonestActions' = numDishonestActions + 1
-    /\ numTransfers' = numTransfers + 1
+        \* Limit the number of dishonest actions to keep the state space bounded.
+        /\ numDishonestActions' = numDishonestActions + 1
+        /\ numTransfers' = numTransfers + 1
 
-    \* Choose an amount that's greater than the balance.
-    /\ LET amount == Max({subnets[sender].balance + 10, 1}) IN
-        \* Send a transfer to the receiver.
-        /\ subnetMsgs' = subnetMsgs \union {[
-                id |-> numTransfers,
-                type |-> TRANSFER,
-                from |-> sender,
-                to |-> receiver,
-                amount |-> amount
-            ]}
+        \* Choose an amount that's greater than the balance.
+        /\ \E counterfeit_cycles \in 1..MAX_COUNTERFEIT_CYCLES:
+            /\ LET amount == Max({subnets[sender].balance + counterfeit_cycles, 1}) IN
+                \* Send a transfer to the receiver.
+                /\ subnetMsgs' = subnetMsgs \union {[
+                        id |-> numTransfers,
+                        type |-> TRANSFER,
+                        from |-> sender,
+                        to |-> receiver,
+                        amount |-> amount
+                    ]}
 
-        \* Mark subnet as dishonest and subtract balance.
-        /\ subnets' = [subnets EXCEPT ![sender].honest = FALSE,
-                                      ![sender].balance = @ - amount]
+                \* Mark subnet as dishonest and subtract balance.
+                /\ subnets' = [subnets EXCEPT ![sender].honest = FALSE,
+                                              ![sender].balance = @ - amount]
 
-        /\ UNCHANGED<<ledger>>
-
+                /\ UNCHANGED<<ledger>>
 
 SubnetReceiveTransfer ==
   \E msg \in subnetMsgs:
