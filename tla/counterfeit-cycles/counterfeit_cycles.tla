@@ -26,15 +26,15 @@ SubnetsInit ==
              \* The balance of (finalized) cycles on the subnet.
              \* In this model, subnets do not maliciously manipulate this balance.
              balance |-> STARTING_BALANCE_PER_SUBNET,
-             
+
              \* The unfinalized cycles received from other subnets.
              \* Cycles received from other subnets are initially unfinalized
              \* until they are approved by the ledger.
              unfinalized |-> [sb \in SUBNETS |-> 0],
-             
+
              \* A queue of outgoing messages from the subnet to the ledger.
              msgsToLedger |-> <<>>,
-             
+
              \* Whether or not the subnet is honest. This isn't strictly required
              \* in this model.
              \* Initially, all subnets behave honestly.
@@ -44,13 +44,13 @@ SubnetsInit ==
   /\ subnetMsgs = {}
   /\ numDishonestActions = 0
   /\ numTransfers = 0
-  
+
 LedgerInit ==
   \* Initialize the state of the ledger.
   ledger = [
     \* The balance of each subnet.
     balances |-> [s \in SUBNETS |-> STARTING_BALANCE_PER_SUBNET],
-    
+
     \* The queue of messages to be processed.
     msgs |-> [s \in SUBNETS |-> <<>>]
   ]
@@ -111,13 +111,13 @@ TypesOK ==
 SubnetSendTransfer ==
   (* Honestly sends a transfers cycles from one subnet to another. *)
   numTransfers < MAX_TRANSFERS
-  
+
   \* Choose two subnets.
   /\ \E sender, receiver \in SUBNETS: sender /= receiver
-  
+
     \* Choose an amount that's within the subnet's balance.
     /\ \E amount \in 1..subnets[sender].balance:
-    
+
         \* Send a transfer to the receiver.
         /\ subnetMsgs' = subnetMsgs \union {[
                 id |-> numTransfers,
@@ -139,9 +139,9 @@ SubnetDishonestSendTransfer ==
   (* Maliciously transfers more cycles than the subnet's own balance. *)
   numTransfers < MAX_TRANSFERS
   /\ numDishonestActions < MAX_DISHONEST_TRANSFERS
-  /\ \E sender, receiver \in SUBNETS: sender /= receiver 
+  /\ \E sender, receiver \in SUBNETS: sender /= receiver
 
-    \* Limit the number of dishonest actions to keep the state space bounded.  
+    \* Limit the number of dishonest actions to keep the state space bounded.
     /\ numDishonestActions' = numDishonestActions + 1
     /\ numTransfers' = numTransfers + 1
 
@@ -173,7 +173,7 @@ SubnetReceiveTransfer ==
       \* Remove message from subnet messages.
       /\ subnetMsgs' = subnetMsgs \ {msg}
       /\ UNCHANGED<<ledger, numDishonestActions, numTransfers>>
-      
+
 LedgerPoll ==
   \E s \in SUBNETS: Len(subnets[s].msgsToLedger) > 0
     /\ LET msg == Head(subnets[s].msgsToLedger) IN
@@ -187,7 +187,7 @@ LedgerPoll ==
          ]
       /\ UNCHANGED<<subnetMsgs, numDishonestActions, numTransfers>>
 
-SubnetReceiveApprove == 
+SubnetReceiveApprove ==
   \E msg \in subnetMsgs:
       msg.type = APPROVE
       /\ subnets' = [
@@ -210,7 +210,7 @@ LedgerReceiveTransferMessage ==
             \* Transaction is valid. Update ledger balances.
             !["balances"][msg.from] = @ - msg.amount,
             !["balances"][msg.to] = @ + msg.amount,
-            
+
             \* Remove msg from queue.
             !["msgs"][s] = Tail(@)]
         /\ subnetMsgs'= subnetMsgs \union {[
@@ -247,7 +247,7 @@ SumSeq(s) ==
   \* Helper method to sum a sequence
   IF Len(s) = 0 THEN 0
   ELSE Head(s) + SumSeq(Tail(s))
-  
+
 RECURSIVE SumBalance(_)
 SumBalance(s) ==
   \* Helper method to sum a sequence
@@ -263,7 +263,7 @@ NoFakeCyclesAreCreated ==
 SubnetNeverHasMoreBalanceThanLedger ==
   \* The subnet's true balance is at most the balance stored in the ledger
   \* for that subnet.
-  \A s \in SUBNETS: subnets[s].balance <= ledger.balances[s] 
+  \A s \in SUBNETS: subnets[s].balance <= ledger.balances[s]
 
 LedgerAndSubnetBalancesMatchAfterMsgProcessing ==
   \* Ledger and subnets have the same balances whenever all messages are
