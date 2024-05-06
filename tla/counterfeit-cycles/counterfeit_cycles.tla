@@ -20,30 +20,35 @@ APPROVE == "approve"
 (***************************************************************************)
 
 SubnetsInit ==
-  \* Initialize the state of subnets.
-  /\ subnets = [
-         s \in SUBNETS |-> [
-             \* The balance of (finalized) cycles on the subnet.
-             \* In this model, subnets do not maliciously manipulate this balance.
-             balance |-> STARTING_BALANCE_PER_SUBNET,
+    \* Initialize the state of subnets.
+    /\ subnets = [
+        s \in SUBNETS |-> [
+            \* The true balance of (finalized) cycles on the subnet.
+            \* In this model, subnets do not maliciously manipulate this balance.
+            \* Note that the balance can be negative if the subnet maliciously
+            \* sends more cycles than it has.
 
-             \* The unfinalized cycles received from other subnets.
-             \* Cycles received from other subnets are initially unfinalized
-             \* until they are approved by the ledger.
-             unfinalized |-> [sb \in SUBNETS |-> 0],
+            \* The balance of (finalized) cycles on the subnet.
+            \* In this model, subnets do not maliciously manipulate this balance.
+            balance |-> STARTING_BALANCE_PER_SUBNET,
 
-             \* A queue of outgoing messages from the subnet to the ledger.
-             msgsToLedger |-> <<>>,
+            \* The unfinalized cycles received from other subnets.
+            \* Cycles received from other subnets are initially unfinalized
+            \* until they are approved by the ledger.
+            unfinalized |-> [sb \in SUBNETS |-> 0],
 
-             \* Whether or not the subnet is honest. This isn't strictly required
-             \* in this model.
-             \* Initially, all subnets behave honestly.
-             honest |-> TRUE
+            \* A queue of outgoing messages from the subnet to the ledger.
+            msgsToLedger |-> <<>>,
+
+            \* Whether or not the subnet is honest. This isn't strictly required
+            \* in this model.
+            \* Initially, all subnets behave honestly.
+            honest |-> TRUE
          ]
      ]
-  /\ subnetMsgs = {}
-  /\ numDishonestActions = 0
-  /\ numTransfers = 0
+    /\ subnetMsgs = {}
+    /\ numDishonestActions = 0
+    /\ numTransfers = 0
 
 LedgerInit ==
   \* Initialize the state of the ledger.
@@ -222,6 +227,13 @@ LedgerReceiveTransferMessage ==
             ]}
         /\ UNCHANGED<<subnets, numDishonestActions, numTransfers>>
 
+Idle ==
+    \* Do nothing.
+    \* Once the maximum number of transfers is reached, the system is idle.
+    \* This is added to prevent TLA from thinking that it's stuck in a deadlock.
+    /\ numTransfers >= MAX_TRANSFERS
+    /\ UNCHANGED<<ledger, subnets, subnetMsgs, numDishonestActions, numTransfers>>
+
 Next ==
   \/ SubnetSendTransfer
   \/ SubnetReceiveTransfer
@@ -229,6 +241,7 @@ Next ==
   \/ SubnetDishonestSendTransfer
   \/ LedgerReceiveTransferMessage
   \/ LedgerPoll
+  \/ Idle
 
 BalancesNonNegative ==
   (*************************************************************************)
