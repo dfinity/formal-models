@@ -28,9 +28,6 @@ SubnetsInit ==
             \* In this model, subnets do not maliciously manipulate this balance.
             \* Note that the balance can be negative if the subnet maliciously
             \* sends more cycles than it has.
-
-            \* The balance of (finalized) cycles on the subnet.
-            \* In this model, subnets do not maliciously manipulate this balance.
             balance |-> STARTING_BALANCE_PER_SUBNET,
 
             \* The unfinalized cycles received from other subnets.
@@ -187,7 +184,7 @@ LedgerPoll ==
   \E s \in SUBNETS: Len(subnets[s].msgsToLedger) > 0
     /\ LET msg == Head(subnets[s].msgsToLedger) IN
       \* Send message to ledger.
-      /\ ledger' = [ledger EXCEPT !["msgs"][s] = Append(@,
+      /\ ledger' = [ledger EXCEPT !.msgs[s] = Append(@,
           [id |-> msg.id, type |-> TRANSFER, from |-> msg.from, to |-> msg.to, amount |-> msg.amount]
         )]
       \* Remove message from the queue.
@@ -283,7 +280,6 @@ SubnetNeverHasMoreBalanceThanLedger ==
   \* for that subnet.
   \A s \in SUBNETS: subnets[s].balance <= ledger.balances[s]
 
-\* TODO: is this invariant evaluated ever?
 LedgerAndSubnetBalancesMatchAfterMsgProcessing ==
   \* Ledger and subnets have the same balances whenever all messages are
   \* processed.
