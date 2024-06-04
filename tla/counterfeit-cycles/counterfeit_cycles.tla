@@ -9,7 +9,7 @@ CONSTANT SUBNETS, \* The set of subnets.
 
 ASSUME MAX_TRANSFERS >= MAX_DISHONEST_TRANSFERS
 
-VARIABLE ledger, subnets, subnetMsgs, numDishonestActions, numTransfers
+VARIABLE tracker, subnets, subnetMsgs, numDishonestActions, numTransfers
 
 TOTAL_SUPPLY == STARTING_BALANCE_PER_SUBNET * Cardinality(SUBNETS)
 TRANSFER == "transfer"
@@ -32,11 +32,11 @@ SubnetsInit ==
 
             \* The unfinalized cycles received from other subnets.
             \* Cycles received from other subnets are initially unfinalized
-            \* until they are approved by the ledger.
+            \* until they are approved by the tracker.
             unfinalized |-> [sb \in SUBNETS |-> 0],
 
-            \* A queue of outgoing messages from the subnet to the ledger.
-            msgsToLedger |-> <<>>,
+            \* A queue of outgoing messages from the subnet to the tracker.
+            msgsToTracker |-> <<>>,
 
             \* Whether or not the subnet is honest. This isn't strictly required
             \* in this model.
@@ -48,9 +48,9 @@ SubnetsInit ==
     /\ numDishonestActions = 0
     /\ numTransfers = 0
 
-LedgerInit ==
-  \* Initialize the state of the ledger.
-  ledger = [
+TrackerInit ==
+  \* Initialize the state of the tracker.
+  tracker = [
     \* The balance of each subnet.
     balances |-> [s \in SUBNETS |-> STARTING_BALANCE_PER_SUBNET],
 
@@ -59,7 +59,7 @@ LedgerInit ==
   ]
 
 Init ==
-  /\ LedgerInit
+  /\ TrackerInit
   /\ SubnetsInit
 
 -----------------------------------------------------------------------------
@@ -78,12 +78,12 @@ SubnetMessages ==
     \union
 
   \* Approving a cycles transfer.
-  \* This message is sent by the ledger to indicate that the `amount` sent is
+  \* This message is sent by the tracker to indicate that the `amount` sent is
   \* now finalized.
   [id: Nat, type : {APPROVE}, from : SUBNETS, to : SUBNETS, amount : Nat \ {0}]
 
-LedgerMessages ==
-  \* The set of all possible messages that can be received by the Ledger.
+TrackerMessages ==
+  \* The set of all possible messages that can be received by the Tracker.
   TransferMessage
 
 SubnetsTypeOK ==
@@ -91,19 +91,19 @@ SubnetsTypeOK ==
   /\ subnets \in [SUBNETS -> [
         balance: Int,
         unfinalized: [SUBNETS -> Nat],
-        msgsToLedger: Seq(LedgerMessages),
+        msgsToTracker: Seq(TrackerMessages),
         honest: {TRUE, FALSE}
      ]]
 
-LedgerTypesOK ==
+TrackerTypesOK ==
   \* Type-correctness invariant.
-  /\ DOMAIN ledger.balances = SUBNETS
-  /\ \A s \in SUBNETS: ledger.balances[s] >= 0
-  /\ \A i \in DOMAIN ledger.msgs: ToSet(ledger.msgs[i]) \subseteq LedgerMessages
+  /\ DOMAIN tracker.balances = SUBNETS
+  /\ \A s \in SUBNETS: tracker.balances[s] >= 0
+  /\ \A i \in DOMAIN tracker.msgs: ToSet(tracker.msgs[i]) \subseteq TrackerMessages
 
 TypesOK ==
   \* Type-correctness invariant.
-  /\ LedgerTypesOK
+  /\ TrackerTypesOK
   /\ SubnetsTypeOK
 
 -----------------------------------------------------------------------------
@@ -136,7 +136,7 @@ SubnetSendTransfer ==
         \* Limit the number of transfers to keep the state space bounded.
         /\ numTransfers' = numTransfers + 1
 
-        /\ UNCHANGED<<ledger, numDishonestActions>>
+        /\ UNCHANGED<<tracker, numDishonestActions>>
 
 SubnetDishonestSendTransfer ==
     (* Maliciously transfers more cycles than the subnet's own balance. *)
@@ -165,7 +165,7 @@ SubnetDishonestSendTransfer ==
                 /\ subnets' = [subnets EXCEPT ![sender].honest = FALSE,
                                               ![sender].balance = @ - amount]
 
-                /\ UNCHANGED<<ledger>>
+                /\ UNCHANGED<<tracker>>
 
 SubnetReceiveTransfer ==
   \E msg \in subnetMsgs:
@@ -173,23 +173,23 @@ SubnetReceiveTransfer ==
       /\ subnets' = [
                          \* Add amount in transfer to the unfinalized balance.
           subnets EXCEPT ![msg.to].unfinalized[msg.from] = @ + msg.amount,
-                         \* Add message to ledger outgoing queue.
-                         ![msg.to].msgsToLedger = Append(@, msg)
+                         \* Add message to tracker outgoing queue.
+                         ![msg.to].msgsToTracker = Append(@, msg)
          ]
       \* Remove message from subnet messages.
       /\ subnetMsgs' = subnetMsgs \ {msg}
-      /\ UNCHANGED<<ledger, numDishonestActions, numTransfers>>
+      /\ UNCHANGED<<tracker, numDishonestActions, numTransfers>>
 
-LedgerPoll ==
-  \E s \in SUBNETS: Len(subnets[s].msgsToLedger) > 0
-    /\ LET msg == Head(subnets[s].msgsToLedger) IN
-      \* Send message to ledger.
-      /\ ledger' = [ledger EXCEPT !.msgs[s] = Append(@,
+TrackerPoll ==
+  \E s \in SUBNETS: Len(subnets[s].msgsToTracker) > 0
+    /\ LET msg == Head(subnets[s].msgsToTracker) IN
+      \* Send message to tracker.
+      /\ tracker' = [tracker EXCEPT !.msgs[s] = Append(@,
           [id |-> msg.id, type |-> TRANSFER, from |-> msg.from, to |-> msg.to, amount |-> msg.amount]
         )]
       \* Remove message from the queue.
       /\ subnets' = [
-            subnets EXCEPT ![s].msgsToLedger = Tail(@)
+            subnets EXCEPT ![s].msgsToTracker = Tail(@)
          ]
       /\ UNCHANGED<<subnetMsgs, numDishonestActions, numTransfers>>
 
@@ -202,18 +202,18 @@ SubnetReceiveApprove ==
       ]
       \* Remove message from subnet messages.
       /\ subnetMsgs' = subnetMsgs \ {msg}
-      /\ UNCHANGED<<ledger, numDishonestActions, numTransfers>>
+      /\ UNCHANGED<<tracker, numDishonestActions, numTransfers>>
 
-LedgerReceiveTransferMessage ==
+TrackerReceiveTransferMessage ==
   \* If a transfer message is received and there is enough balance, then update the
   \* balances and send the approval to the subnet.
-  \E s \in SUBNETS: Len(ledger.msgs[s]) > 0
-    /\ LET msg == Head(ledger.msgs[s]) IN
+  \E s \in SUBNETS: Len(tracker.msgs[s]) > 0
+    /\ LET msg == Head(tracker.msgs[s]) IN
         /\ msg.type = TRANSFER
-        /\ msg.amount <= ledger.balances[msg.from]
-        /\ ledger' = [
-            ledger EXCEPT
-            \* Transaction is valid. Update ledger balances.
+        /\ msg.amount <= tracker.balances[msg.from]
+        /\ tracker' = [
+            tracker EXCEPT
+            \* Transaction is valid. Update tracker balances.
             !["balances"][msg.from] = @ - msg.amount,
             !["balances"][msg.to] = @ + msg.amount,
 
@@ -233,15 +233,15 @@ Idle ==
     \* Once the maximum number of transfers is reached, the system is idle.
     \* This is added to prevent TLA from thinking that it's stuck in a deadlock.
     /\ (numTransfers >= MAX_TRANSFERS \/ numDishonestActions >= MAX_DISHONEST_TRANSFERS)
-    /\ UNCHANGED<<ledger, subnets, subnetMsgs, numDishonestActions, numTransfers>>
+    /\ UNCHANGED<<tracker, subnets, subnetMsgs, numDishonestActions, numTransfers>>
 
 Next ==
   \/ SubnetSendTransfer
   \/ SubnetReceiveTransfer
   \/ SubnetReceiveApprove
   \/ SubnetDishonestSendTransfer
-  \/ LedgerReceiveTransferMessage
-  \/ LedgerPoll
+  \/ TrackerReceiveTransferMessage
+  \/ TrackerPoll
   \/ Idle
 
 BalancesNonNegative ==
@@ -268,24 +268,24 @@ SumBalance(s) ==
   IF Len(s) = 0 THEN 0
   ELSE Head(s).balance + SumBalance(Tail(s))
 
-TotalSupplyInLedgerRemainsConstant ==
-    SumSeq(RecordToSeq(ledger.balances, SUBNETS)) = TOTAL_SUPPLY
+TotalSupplyInTrackerRemainsConstant ==
+    SumSeq(RecordToSeq(tracker.balances, SUBNETS)) = TOTAL_SUPPLY
 
 NoFakeCyclesAreCreated ==
   \* The total supply of cycles that each subnet thinks it has is capped.
   /\ SumBalance(RecordToSeq(subnets, SUBNETS)) <= TOTAL_SUPPLY
 
-SubnetNeverHasMoreBalanceThanLedger ==
-  \* The subnet's true balance is at most the balance stored in the ledger
+SubnetNeverHasMoreBalanceThanTracker ==
+  \* The subnet's true balance is at most the balance stored in the tracker
   \* for that subnet.
-  \A s \in SUBNETS: subnets[s].balance <= ledger.balances[s]
+  \A s \in SUBNETS: subnets[s].balance <= tracker.balances[s]
 
-LedgerAndSubnetBalancesMatchAfterMsgProcessing ==
-  \* Ledger and subnets have the same balances whenever all messages are
+TrackerAndSubnetBalancesMatchAfterMsgProcessing ==
+  \* Tracker and subnets have the same balances whenever all messages are
   \* processed.
-  /\ (\A s \in SUBNETS: Len(ledger.msgs[s]) = 0)
-    /\ (\A s \in SUBNETS: Len(subnets[s].msgsToLedger) = 0)
+  /\ (\A s \in SUBNETS: Len(tracker.msgs[s]) = 0)
+    /\ (\A s \in SUBNETS: Len(subnets[s].msgsToTracker) = 0)
     /\ Cardinality(subnetMsgs) = 0
-  => \A sn \in SUBNETS: ledger.balances[sn] = subnets[sn].balance
+  => \A sn \in SUBNETS: tracker.balances[sn] = subnets[sn].balance
 
 =============================================================================
