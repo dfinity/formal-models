@@ -12,7 +12,9 @@ Remove_File(fs, id) ==
     { f \in fs: f.id # id }
 
 Is_Expired(fs, idx) ==
-    \E f \in fs: f.id = idx /\ f.expired
+    \/ \E f \in fs: f.id = idx /\ f.expired
+    \* Treating missing files as expired doesn't work
+    \* \/ \A f \in fs: f.id # idx
 
 Already_Exists(files, n) ==
     \E f \in files: f.id = n
@@ -85,14 +87,7 @@ process (Client \in PROCESSES)
         };
     Critical:
         critical := critical \cup {self};
-    Maybe_Die:
-        either {
-            skip;
-        } or {
-            dead := dead \cup {self};
-            goto Done;
-        };
-    Release:
+   Release:
         critical := critical \ {self};
         files := { f \in files: f.id # 0 };
         goto Lease_Begin;
@@ -109,7 +104,7 @@ process (Mark_Expired = MARK_EXPIRED_ID) {
 
 }
 *)
-\* BEGIN TRANSLATION (chksum(pcal) = "ef1c2eeb" /\ chksum(tla) = "158939ea")
+\* BEGIN TRANSLATION (chksum(pcal) = "8c88ff5b" /\ chksum(tla) = "81f7a823")
 VARIABLES pc, files, result_buffer, critical, dead, idx
 
 vars == << pc, files, result_buffer, critical, dead, idx >>
@@ -189,16 +184,8 @@ Rename_Loop(self) == /\ pc[self] = "Rename_Loop"
 
 Critical(self) == /\ pc[self] = "Critical"
                   /\ critical' = (critical \cup {self})
-                  /\ pc' = [pc EXCEPT ![self] = "Maybe_Die"]
+                  /\ pc' = [pc EXCEPT ![self] = "Release"]
                   /\ UNCHANGED << files, result_buffer, dead, idx >>
-
-Maybe_Die(self) == /\ pc[self] = "Maybe_Die"
-                   /\ \/ /\ TRUE
-                         /\ pc' = [pc EXCEPT ![self] = "Release"]
-                         /\ dead' = dead
-                      \/ /\ dead' = (dead \cup {self})
-                         /\ pc' = [pc EXCEPT ![self] = "Done"]
-                   /\ UNCHANGED << files, result_buffer, critical, idx >>
 
 Release(self) == /\ pc[self] = "Release"
                  /\ critical' = critical \ {self}
@@ -209,8 +196,7 @@ Release(self) == /\ pc[self] = "Release"
 Client(self) == Lease_Begin(self) \/ Wait_For_Lock_0(self)
                    \/ Check_Stale(self) \/ Wait_For_Stale(self)
                    \/ Wait_For_Lock_1(self) \/ Wait_For_Stale_1(self)
-                   \/ Rename_Loop(self) \/ Critical(self)
-                   \/ Maybe_Die(self) \/ Release(self)
+                   \/ Rename_Loop(self) \/ Critical(self) \/ Release(self)
 
 Loop_Expiry == /\ pc[MARK_EXPIRED_ID] = "Loop_Expiry"
                /\ \E f \in { f2 \in files: f2.pid \in dead /\ ~f2.expired}:
@@ -220,19 +206,29 @@ Loop_Expiry == /\ pc[MARK_EXPIRED_ID] = "Loop_Expiry"
 
 Mark_Expired == Loop_Expiry
 
-(* Allow infinite stuttering to prevent deadlock on termination. *)
-Terminating == /\ \A self \in ProcSet: pc[self] = "Done"
-               /\ UNCHANGED vars
-
 Next == Mark_Expired
            \/ (\E self \in PROCESSES: Client(self))
-           \/ Terminating
 
 Spec == Init /\ [][Next]_vars
 
-Termination == <>(\A self \in ProcSet: pc[self] = "Done")
-
 \* END TRANSLATION 
+
+
+\* -------------------------
+\* Modified transition relation
+\* -------------------------
+
+Next_With_Killing_And_Idling ==
+    \/ Next
+    \/ \E pid \in PROCESSES:
+        /\ pc' = [pc EXCEPT ![pid] = "Done"]
+        /\ dead' = dead \cup {pid}
+        /\ UNCHANGED << files, result_buffer, critical, idx >>
+    \/ 
+        \* Allow idling if everyone is dead
+        /\ dead = PROCESSES
+        /\ UNCHANGED << files, result_buffer, critical, dead, idx, pc >>
+
 
 \* -------------------------
 \* Sanity checks
@@ -249,5 +245,26 @@ Only_One_Alive_Critical == Cardinality(critical \ dead ) <= 1
 
 No_Two_Files_With_Same_Id ==
     \A f1, f2 \in files: f1.id = f2.id => f1 = f2
+
+Fairness == 
+    /\ WF_vars(Mark_Expired)
+    /\ \A p \in PROCESSES:
+        /\ WF_vars(Lease_Begin(p))
+        /\ WF_vars(Wait_For_Lock_0(p))
+        /\ WF_vars(Check_Stale(p))
+        /\ WF_vars(Wait_For_Stale(p))
+        /\ WF_vars(Wait_For_Lock_1(p))
+        /\ WF_vars(Wait_For_Stale_1(p))
+        /\ WF_vars(Rename_Loop(p))
+        /\ WF_vars(Critical(p))
+        /\ WF_vars(Release(p))
+
+Spec_With_Fairness ==
+    /\ Init
+    /\ [][Next_With_Killing_And_Idling]_vars
+    /\ Fairness
+
+Everyone_Eventually_Gets_Lease_Or_Dies ==
+    \A p \in PROCESSES: <>(p \in critical \cup dead)
 
 ====
