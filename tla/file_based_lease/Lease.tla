@@ -102,14 +102,14 @@ process (Mark_Expired = MARK_EXPIRED_ID) {
     Loop_Expiry:
     while(TRUE) {
         with(f \in { f2 \in files: f2.pid \in dead /\ ~f2.expired} ) {
-            files := files \cup {[ f EXCEPT !.expired = TRUE ]};
+            files := (files \ {f}) \cup {[ f EXCEPT !.expired = TRUE ]};
         }
     }
 }
 
 }
 *)
-\* BEGIN TRANSLATION (chksum(pcal) = "b784e367" /\ chksum(tla) = "9a714f33")
+\* BEGIN TRANSLATION (chksum(pcal) = "ef1c2eeb" /\ chksum(tla) = "158939ea")
 VARIABLES pc, files, result_buffer, critical, dead, idx
 
 vars == << pc, files, result_buffer, critical, dead, idx >>
@@ -214,7 +214,7 @@ Client(self) == Lease_Begin(self) \/ Wait_For_Lock_0(self)
 
 Loop_Expiry == /\ pc[MARK_EXPIRED_ID] = "Loop_Expiry"
                /\ \E f \in { f2 \in files: f2.pid \in dead /\ ~f2.expired}:
-                    files' = (files \cup {[ f EXCEPT !.expired = TRUE ]})
+                    files' = ((files \ {f}) \cup {[ f EXCEPT !.expired = TRUE ]})
                /\ pc' = [pc EXCEPT ![MARK_EXPIRED_ID] = "Loop_Expiry"]
                /\ UNCHANGED << result_buffer, critical, dead, idx >>
 
@@ -234,11 +234,20 @@ Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 
 \* END TRANSLATION 
 
+\* -------------------------
+\* Sanity checks
+\* -------------------------
+
+Cant_Reach_P_Processes ==
+    Cardinality(files) < Cardinality(PROCESSES)
 
 \* -------------------------
 \* Properties
 \* -------------------------
 
 Only_One_Alive_Critical == Cardinality(critical \ dead ) <= 1
+
+No_Two_Files_With_Same_Id ==
+    \A f1, f2 \in files: f1.id = f2.id => f1 = f2
 
 ====
