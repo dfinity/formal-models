@@ -55,6 +55,7 @@ process (Client \in PROCESSES)
             goto Critical;
         };
     Check_Stale:
+        idx := 0;
         result_buffer[self] := Is_Expired(files, idx);
     Wait_For_Stale:
         if(~result_buffer[self]) {
@@ -104,7 +105,7 @@ process (Mark_Expired = MARK_EXPIRED_ID) {
 
 }
 *)
-\* BEGIN TRANSLATION (chksum(pcal) = "8c88ff5b" /\ chksum(tla) = "81f7a823")
+\* BEGIN TRANSLATION (chksum(pcal) = "86d78cf1" /\ chksum(tla) = "88c6281e")
 VARIABLES pc, files, result_buffer, critical, dead, idx
 
 vars == << pc, files, result_buffer, critical, dead, idx >>
@@ -138,9 +139,10 @@ Wait_For_Lock_0(self) == /\ pc[self] = "Wait_For_Lock_0"
                                          idx >>
 
 Check_Stale(self) == /\ pc[self] = "Check_Stale"
-                     /\ result_buffer' = [result_buffer EXCEPT ![self] = Is_Expired(files, idx[self])]
+                     /\ idx' = [idx EXCEPT ![self] = 0]
+                     /\ result_buffer' = [result_buffer EXCEPT ![self] = Is_Expired(files, idx'[self])]
                      /\ pc' = [pc EXCEPT ![self] = "Wait_For_Stale"]
-                     /\ UNCHANGED << files, critical, dead, idx >>
+                     /\ UNCHANGED << files, critical, dead >>
 
 Wait_For_Stale(self) == /\ pc[self] = "Wait_For_Stale"
                         /\ IF ~result_buffer[self]
