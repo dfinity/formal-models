@@ -51,11 +51,11 @@ process (Client \in PROCESSES)
     Lease_Begin:
         atomic_create(0);
     Wait_For_Lock_0:
+        idx := 0;
         if(result_buffer[self]) {
             goto Critical;
         };
     Check_Stale:
-        idx := 0;
         result_buffer[self] := Is_Expired(files, idx);
     Wait_For_Stale:
         if(~result_buffer[self]) {
@@ -105,7 +105,8 @@ process (Mark_Expired = MARK_EXPIRED_ID) {
 
 }
 *)
-\* BEGIN TRANSLATION (chksum(pcal) = "86d78cf1" /\ chksum(tla) = "88c6281e")
+
+\* BEGIN TRANSLATION (chksum(pcal) = "31996a81" /\ chksum(tla) = "2b2632c4")
 VARIABLES pc, files, result_buffer, critical, dead, idx
 
 vars == << pc, files, result_buffer, critical, dead, idx >>
@@ -132,17 +133,16 @@ Lease_Begin(self) == /\ pc[self] = "Lease_Begin"
                      /\ UNCHANGED << critical, dead, idx >>
 
 Wait_For_Lock_0(self) == /\ pc[self] = "Wait_For_Lock_0"
+                         /\ idx' = [idx EXCEPT ![self] = 0]
                          /\ IF result_buffer[self]
                                THEN /\ pc' = [pc EXCEPT ![self] = "Critical"]
                                ELSE /\ pc' = [pc EXCEPT ![self] = "Check_Stale"]
-                         /\ UNCHANGED << files, result_buffer, critical, dead, 
-                                         idx >>
+                         /\ UNCHANGED << files, result_buffer, critical, dead >>
 
 Check_Stale(self) == /\ pc[self] = "Check_Stale"
-                     /\ idx' = [idx EXCEPT ![self] = 0]
-                     /\ result_buffer' = [result_buffer EXCEPT ![self] = Is_Expired(files, idx'[self])]
+                     /\ result_buffer' = [result_buffer EXCEPT ![self] = Is_Expired(files, idx[self])]
                      /\ pc' = [pc EXCEPT ![self] = "Wait_For_Stale"]
-                     /\ UNCHANGED << files, critical, dead >>
+                     /\ UNCHANGED << files, critical, dead, idx >>
 
 Wait_For_Stale(self) == /\ pc[self] = "Wait_For_Stale"
                         /\ IF ~result_buffer[self]
@@ -268,5 +268,8 @@ Spec_With_Fairness ==
 
 Everyone_Eventually_Gets_Lease_Or_Dies ==
     \A p \in PROCESSES: <>(p \in critical \cup dead)
+
+Someone_Always_Eventually_Gets_Lease_Or_All_Dead ==
+    []<>(dead = PROCESSES \/ \E p \in PROCESSES: p \in critical)
 
 ====
