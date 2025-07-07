@@ -53,7 +53,8 @@ process (Client \in PROCESSES)
     Wait_For_Lock_0:
         idx := 0;
         if(result_buffer[self]) {
-            goto Critical;
+            critical := critical \cup {self};
+            goto Release;
         };
     Check_Stale:
         result_buffer[self] := Is_Expired(files, idx);
@@ -75,19 +76,18 @@ process (Client \in PROCESSES)
             files := Remove_File(files, idx + 1);
             goto Lease_Begin;
         } else {
-            files := Move(files, idx + 1, idx);
+            if(idx >= 0) {
+                files := Move(files, idx + 1, idx);
+                result_buffer[self] := Is_Expired(files, idx);
+            } else {
+                files := Remove_File(files, 0);
+                goto Lease_Begin;
+            };
         };
     Rename_Loop:
-        if(idx > 0) {
-            idx := idx - 1;
-            files := Move(files, idx + 1, idx);
-            goto Rename_Loop;
-        } else {
-            files := Remove_File(files, 0);
-            goto Lease_Begin;
-        };
-    Critical:
-        critical := critical \cup {self};
+        idx := idx - 1;
+        result_buffer[self] := Is_Expired(files, idx);
+        goto Wait_For_Stale_1;
    Release:
         critical := critical \ {self};
         files := { f \in files: f.id # 0 };
@@ -106,7 +106,7 @@ process (Mark_Expired = MARK_EXPIRED_ID) {
 }
 *)
 
-\* BEGIN TRANSLATION (chksum(pcal) = "31996a81" /\ chksum(tla) = "2b2632c4")
+\* BEGIN TRANSLATION (chksum(pcal) = "92b81274" /\ chksum(tla) = "19aac7e3")
 VARIABLES pc, files, result_buffer, critical, dead, idx
 
 vars == << pc, files, result_buffer, critical, dead, idx >>
@@ -135,9 +135,11 @@ Lease_Begin(self) == /\ pc[self] = "Lease_Begin"
 Wait_For_Lock_0(self) == /\ pc[self] = "Wait_For_Lock_0"
                          /\ idx' = [idx EXCEPT ![self] = 0]
                          /\ IF result_buffer[self]
-                               THEN /\ pc' = [pc EXCEPT ![self] = "Critical"]
+                               THEN /\ critical' = (critical \cup {self})
+                                    /\ pc' = [pc EXCEPT ![self] = "Release"]
                                ELSE /\ pc' = [pc EXCEPT ![self] = "Check_Stale"]
-                         /\ UNCHANGED << files, result_buffer, critical, dead >>
+                                    /\ UNCHANGED critical
+                         /\ UNCHANGED << files, result_buffer, dead >>
 
 Check_Stale(self) == /\ pc[self] = "Check_Stale"
                      /\ result_buffer' = [result_buffer EXCEPT ![self] = Is_Expired(files, idx[self])]
@@ -170,24 +172,21 @@ Wait_For_Stale_1(self) == /\ pc[self] = "Wait_For_Stale_1"
                           /\ IF ~result_buffer[self]
                                 THEN /\ files' = Remove_File(files, idx[self] + 1)
                                      /\ pc' = [pc EXCEPT ![self] = "Lease_Begin"]
-                                ELSE /\ files' = Move(files, idx[self] + 1, idx[self])
-                                     /\ pc' = [pc EXCEPT ![self] = "Rename_Loop"]
-                          /\ UNCHANGED << result_buffer, critical, dead, idx >>
+                                     /\ UNCHANGED result_buffer
+                                ELSE /\ IF idx[self] >= 0
+                                           THEN /\ files' = Move(files, idx[self] + 1, idx[self])
+                                                /\ result_buffer' = [result_buffer EXCEPT ![self] = Is_Expired(files', idx[self])]
+                                                /\ pc' = [pc EXCEPT ![self] = "Rename_Loop"]
+                                           ELSE /\ files' = Remove_File(files, 0)
+                                                /\ pc' = [pc EXCEPT ![self] = "Lease_Begin"]
+                                                /\ UNCHANGED result_buffer
+                          /\ UNCHANGED << critical, dead, idx >>
 
 Rename_Loop(self) == /\ pc[self] = "Rename_Loop"
-                     /\ IF idx[self] > 0
-                           THEN /\ idx' = [idx EXCEPT ![self] = idx[self] - 1]
-                                /\ files' = Move(files, idx'[self] + 1, idx'[self])
-                                /\ pc' = [pc EXCEPT ![self] = "Rename_Loop"]
-                           ELSE /\ files' = Remove_File(files, 0)
-                                /\ pc' = [pc EXCEPT ![self] = "Lease_Begin"]
-                                /\ idx' = idx
-                     /\ UNCHANGED << result_buffer, critical, dead >>
-
-Critical(self) == /\ pc[self] = "Critical"
-                  /\ critical' = (critical \cup {self})
-                  /\ pc' = [pc EXCEPT ![self] = "Release"]
-                  /\ UNCHANGED << files, result_buffer, dead, idx >>
+                     /\ idx' = [idx EXCEPT ![self] = idx[self] - 1]
+                     /\ result_buffer' = [result_buffer EXCEPT ![self] = Is_Expired(files, idx'[self])]
+                     /\ pc' = [pc EXCEPT ![self] = "Wait_For_Stale_1"]
+                     /\ UNCHANGED << files, critical, dead >>
 
 Release(self) == /\ pc[self] = "Release"
                  /\ critical' = critical \ {self}
@@ -198,7 +197,7 @@ Release(self) == /\ pc[self] = "Release"
 Client(self) == Lease_Begin(self) \/ Wait_For_Lock_0(self)
                    \/ Check_Stale(self) \/ Wait_For_Stale(self)
                    \/ Wait_For_Lock_1(self) \/ Wait_For_Stale_1(self)
-                   \/ Rename_Loop(self) \/ Critical(self) \/ Release(self)
+                   \/ Rename_Loop(self) \/ Release(self)
 
 Loop_Expiry == /\ pc[MARK_EXPIRED_ID] = "Loop_Expiry"
                /\ \E f \in { f2 \in files: f2.pid \in dead /\ ~f2.expired}:
@@ -258,7 +257,6 @@ Fairness ==
         /\ WF_vars(Wait_For_Lock_1(p))
         /\ WF_vars(Wait_For_Stale_1(p))
         /\ WF_vars(Rename_Loop(p))
-        /\ WF_vars(Critical(p))
         /\ WF_vars(Release(p))
 
 Spec_With_Fairness ==
