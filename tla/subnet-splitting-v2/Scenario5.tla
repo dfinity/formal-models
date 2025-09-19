@@ -4,6 +4,7 @@ EXTENDS TLC
 
 SUBNET_ID_LIST == << "s1", "s2", "s3" >>
 CANISTER_ID_LIST == << "c1", "c2" >>
+INITIALLY_EXISTING_SUBNETS == { "s1", "s2" }
 
 INIT_ROUTING_TABLE == 
   LET 
@@ -38,7 +39,7 @@ VARIABLE
     migration_count,
     rescheduling_count
 
-INSTANCE Subnet_Splitting
+INSTANCE Subnet_Splitting_v2
 
 
 ====
