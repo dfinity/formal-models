@@ -202,6 +202,9 @@ vars == << stream, registry, headers, subnet, next_req_id, migration_procedure, 
 Induction == INSTANCE Message_Induction
 Execution == INSTANCE Canister_Execution
 RegistryOps == INSTANCE Registry_Operations
+registry_ops_vars == << stream, registry, subnet >>
+induction_vars == << stream, registry, subnet, headers, rescheduling_count >>
+execution_vars == << stream, registry, subnet, next_req_id >>
 
 Empty_Subnet_State(canisters) == [
     incoming_index |-> [ s2 \in SUBNET_ID |-> 0 ],
@@ -508,8 +511,26 @@ Next == \E s1, s2 \in SUBNET_ID: \E c1, c2 \in CANISTER_ID:
     \/ Idle
     \* \/ Update_Routing_Table
 
+
+\*************************************************
+\* Sanity checks
+\*************************************************\
+
+\* Properties we don't expect to hold, but if they do, something is very wrong
+
+Sanity_No_Responses_Exist == \A s \in DOMAIN subnet: \A c \in DOMAIN subnet[s].canister:
+    \A msg \in To_Set(subnet[s].canister[c].queue): ~Is_Response(msg)
+
+Sanity_Migration_Never_Finishes ==
+    [][DOMAIN migration_procedure \subseteq DOMAIN migration_procedure']_vars
+
+Sanity_No_Canister_Ever_Migrates ==
+    [][\A s \in DOMAIN subnet: \A c \in DOMAIN subnet[s].canister:
+        ~(\E s2 \in DOMAIN subnet' \ {s}: c \in DOMAIN subnet'[s2].canister)]_vars
+
 \*************************************************
 \* Properties
+\*************************************************
 Inv_Requests_Capped ==
     next_req_id <= MAX_REQUESTS + 1
 
@@ -560,11 +581,11 @@ Inv_At_Most_One_Response == \A s \in DOMAIN subnet: \A c \in DOMAIN subnet[s].ca
 \* To guarantee delivery of responses, we need certain fairness conditions.
 \* Namely, we require that the events below are not postponed forever
 Response_Fairness_Condition == 
-    /\ \A s \in SUBNET_ID: WF_vars(RegistryOps!Update_Local_Registry(s))
+    /\ \A s \in SUBNET_ID: WF_registry_ops_vars(RegistryOps!Update_Local_Registry(s))
     /\ \A s1, s2 \in SUBNET_ID:
-        /\ WF_vars(Induction!Induct_Message(s1, s2))
+        /\ WF_induction_vars(Induction!Induct_Message(s1, s2))
     /\ \A s1, s2 \in SUBNET_ID: \A c1, c2 \in CANISTER_ID:
-        /\ WF_vars(Execution!Send_Response(s1, s2, c1, c2))
+        /\ WF_execution_vars(Execution!Send_Response(s1, s2, c1, c2))
     /\ \A cs \in DOMAIN CANISTERS_TO_MIGRATE:
         \* /\ \E subnet_id \in SUBNET_ID: Record_Incoming_Indices_With_New_Registry(cs, from_subnet_id, subnet_id)
         \* /\ Record_Outgoing_Indices(cs, from_subnet_id)
@@ -574,10 +595,10 @@ Response_Fairness_Condition ==
         /\ \A s2 \in SUBNET_ID: 
             \* Need to induct signals to the parent, such that we can unhalt
             \* the child subnet
-            /\ WF_vars(Induction!Induct_Signal(CANISTERS_TO_MIGRATE[cs].from, s2))
+            /\ WF_induction_vars(Induction!Induct_Signal(CANISTERS_TO_MIGRATE[cs].from, s2))
             \* Need to induct signals from the parent, such that we can reschedule
             \* the responses on REJ signals
-            /\ WF_vars(Induction!Induct_Signal(s2, CANISTERS_TO_MIGRATE[cs].from))
+            /\ WF_induction_vars(Induction!Induct_Signal(s2, CANISTERS_TO_MIGRATE[cs].from))
         (* /\ WF_vars(Migration_Procedure(
                 CANISTERS_TO_MIGRATE[cs].from,
                 CANISTERS_TO_MIGRATE[cs].to,
@@ -589,10 +610,10 @@ Spec == Init /\ []([Next]_vars) /\ Response_Fairness_Condition
 \* The guaranteed response property uses the "leads to" operator: A ~> B means
 \* that whenever A happens, B must also happen at that time or later
 Guaranteed_Response == \A from, to \in CANISTER_ID: \A i \in 1..MAX_REQUESTS:
-      (\E s1, s2 \in SUBNET_ID: 
+      (\E s1, s2 \in DOMAIN subnet: 
         Request(from, to, i) \in To_Set(Live_Stream(s1, s2))) 
     ~>
-      (\E s \in SUBNET_ID: 
+      (\E s \in DOMAIN subnet: 
                 /\ from \in DOMAIN subnet[s].canister
                 /\ Response(to, from, i) \in To_Set(Queue_History(subnet[s].canister[from].queue)))
 
