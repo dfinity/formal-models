@@ -33,7 +33,7 @@ Apply_Registry_Update(registries, registry_version, s, subnet_id) ==
         IN 
             child_subnet_id :> [
                 registry_version |-> registry_version,
-                canister |-> Restrict(s[subnet_id].canister, canisters_to_spin_off),
+                canister |-> Restrict(s[subnet_id].canister, canisters_to_spin_off \intersect DOMAIN s[subnet_id].canister),
                 incoming_index |-> [ sid \in DOMAIN reg.subnet_info |-> 0 ],
                 outgoing_index |-> [ sid \in DOMAIN reg.subnet_info |-> 0 ]
             ] @@ [ s EXCEPT ![subnet_id] = new_self_state ]
