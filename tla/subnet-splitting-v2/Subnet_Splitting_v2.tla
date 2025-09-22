@@ -453,7 +453,9 @@ Remove_From_Migration_List(old_subnet_id, new_subnet_id, cs) ==
 Finish_Migration(old_subnet_id, new_subnet_id, cs) ==
     /\ cs \in DOMAIN migration_procedure
     /\ Is_Mig_Enacted(migration_procedure[cs])
-    \* /\ \A s \in SUBNET_ID: subnet[s].registry_version >= start_version
+    /\ LET
+        split_reg_version == VariantGetUnsafe("SubnetSplitEnacted", migration_procedure[cs])
+       IN \A s \in DOMAIN subnet: subnet[s].registry_version >= split_reg_version
     /\ migration_procedure' = Remove_Argument(migration_procedure, cs)
     /\ migration_count' = migration_count + 1
     /\ UNCHANGED << stream, subnet, next_req_id, headers, rescheduling_count, registry >>
