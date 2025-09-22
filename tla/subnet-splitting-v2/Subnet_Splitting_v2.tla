@@ -108,11 +108,14 @@ MAX_RESCHEDULINGS == 1
 \* Has_Outgoing(indices) == Variant("Has_Outgoing", indices)
 \* @typeAlias: migrationState = 
 \* SubnetSplitEnacted(Int)
-\* | SubnetSplitDone;
+\* SubnetSplitWatchingOutgoing($subnetId -> Int);
 \* @type: Int => $migrationState;
 MIG_SUBNET_SPLIT_ENACTED(registry_version) == Variant("SubnetSplitEnacted", registry_version)
 \* \* @type: $migrationState => Bool;
 Is_Mig_Enacted(mig_state) == VariantTag(mig_state) = "SubnetSplitEnacted"
+MIG_SUBNET_WATCHING_OUTGOING(indices) == Variant("SubnetSplitWatchingOutgoing", indices)
+\* \* @type: $migrationState => Bool;
+Is_Mig_Watching_Outgoing(mig_state) == VariantTag(mig_state) = "SubnetSplitWatchingOutgoing"
 
 \* \* @type: Int => $migrationState;
 \* MIG_STARTED(registry_version) == Variant("Mig_Started", registry_version)
@@ -450,18 +453,39 @@ Remove_From_Migration_List(old_subnet_id, new_subnet_id, cs) ==
     /\ UNCHANGED << stream, subnet, next_req_id, headers, rescheduling_count >>
 *)
 
-
-
-\* "Operator" event: start migrating a canister
-Finish_Migration(old_subnet_id, new_subnet_id, cs) ==
+Record_Outgoing_Indices(cs, parent_subnet_id) ==
     /\ cs \in DOMAIN migration_procedure
     /\ Is_Mig_Enacted(migration_procedure[cs])
     /\ LET
         split_reg_version == VariantGetUnsafe("SubnetSplitEnacted", migration_procedure[cs])
-       IN \A s \in DOMAIN subnet: subnet[s].registry_version >= split_reg_version
+        outgoing_indices == [ sn2 \in SUBNET_ID |-> Len(stream[<< parent_subnet_id, sn2 >>])]
+      IN
+        /\ \A s \in DOMAIN subnet: subnet[s].registry_version >= split_reg_version
+        /\ migration_procedure' = Set_Migration_State(migration_procedure, cs, 
+            MIG_SUBNET_WATCHING_OUTGOING(outgoing_indices)
+           )
+    /\ UNCHANGED << registry, headers, stream, subnet, next_req_id, migration_count, rescheduling_count >>
+
+\* "Operator" event: start migrating a canister
+Finish_Migration(old_subnet_id, new_subnet_id, cs) ==
+    /\ cs \in DOMAIN migration_procedure
+    /\ Is_Mig_Watching_Outgoing(migration_procedure[cs])
+    /\ LET
+        indices == VariantGetUnsafe("SubnetSplitWatchingOutgoing", migration_procedure[cs])
+      IN
+        /\ \A to \in SUBNET_ID \ {new_subnet_id}:
+            /\ to \in DOMAIN indices
+            /\ subnet[old_subnet_id].outgoing_index[to] >= indices[to]
     /\ migration_procedure' = Remove_Argument(migration_procedure, cs)
     /\ migration_count' = migration_count + 1
-    /\ UNCHANGED << stream, subnet, next_req_id, headers, rescheduling_count, registry >>
+    /\ registry' = Append(registry, 
+        [
+            routing_table |-> [ c \in cs |-> [ on |-> Current_Table[c].on, migration_list |-> << >> ] ]
+                            @@ Current_Table,
+            subnet_info |->  Current_Subnet_Info
+        ]
+       )
+    /\ UNCHANGED << stream, subnet, next_req_id, headers, rescheduling_count >>
 
 \* All "operator" events
 Migration_Procedure(from_subnet_id, to_subnet_id, cs) ==
@@ -475,6 +499,7 @@ Migration_Procedure(from_subnet_id, to_subnet_id, cs) ==
     \/ Unhalt_Subnet(from_subnet_id, to_subnet_id, cs)
     \/ Remove_From_Migration_List(from_subnet_id, to_subnet_id, cs)
     *)
+    \/ Record_Outgoing_Indices(cs, from_subnet_id)
     \/ Finish_Migration(from_subnet_id, to_subnet_id, cs)
 
 Init ==
@@ -527,6 +552,12 @@ Sanity_Migration_Never_Finishes ==
 Sanity_No_Canister_Ever_Migrates ==
     [][\A s \in DOMAIN subnet: \A c \in DOMAIN subnet[s].canister:
         ~(\E s2 \in DOMAIN subnet' \ {s}: c \in DOMAIN subnet'[s2].canister)]_vars
+
+Sanity_Migration_List_Never_Cleared ==
+    [][\A c \in DOMAIN Current_Table: 
+        Current_Table[c].migration_list # <<>>
+         => Current_Table'[c].migration_list # <<>>
+    ]_vars
 
 \*************************************************
 \* Properties
