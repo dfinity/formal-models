@@ -132,7 +132,7 @@ Induct_Message(subnet_id, sending_subnet_id) ==
             \* TODO: get reasonable error messages with TLC while keeping Apalache happy
             "Sender wasn't OK")
             \* "For subnet " \o subnet_id \o ", subnet " \o sending_subnet_id \o " wasn't OK for sending canister " \o msg.from)
-        /\ Assert(~Recipient_Hosted(subnet_id, msg) => Should_Reroute(subnet_id, msg),
+        /\ Assert(~Recipient_Hosted(subnet_id, msg) => Is_Request(msg) \/ Should_Reroute(subnet_id, msg),
             \* TODO: get reasonable error messages with TLC while keeping Apalache happy
             "Recipient not hosted, but not re-routing the message")
             \* "Recipient " \o msg.to \o " not hosted on " \o subnet_id \o " and message shouldn't be re-routed")

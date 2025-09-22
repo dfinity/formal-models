@@ -108,14 +108,19 @@ MAX_RESCHEDULINGS == 1
 \* Has_Outgoing(indices) == Variant("Has_Outgoing", indices)
 \* @typeAlias: migrationState = 
 \* SubnetSplitEnacted(Int)
-\* SubnetSplitWatchingOutgoing($subnetId -> Int);
+\* | SubnetSplitFlushingToAll($subnetId -> Int)
+\* | SubnetSplitFlushingToChild(Int);
 \* @type: Int => $migrationState;
 MIG_SUBNET_SPLIT_ENACTED(registry_version) == Variant("SubnetSplitEnacted", registry_version)
 \* \* @type: $migrationState => Bool;
 Is_Mig_Enacted(mig_state) == VariantTag(mig_state) = "SubnetSplitEnacted"
-MIG_SUBNET_WATCHING_OUTGOING(indices) == Variant("SubnetSplitWatchingOutgoing", indices)
+MIG_SUBNET_FLUSHING_TO_ALL(indices) == Variant("SubnetSplitFlushingToAll", indices)
 \* \* @type: $migrationState => Bool;
-Is_Mig_Watching_Outgoing(mig_state) == VariantTag(mig_state) = "SubnetSplitWatchingOutgoing"
+Is_Mig_Flushing_To_All(mig_state) == VariantTag(mig_state) = "SubnetSplitFlushingToAll"
+
+MIG_SUBNET_FLUSHING_TO_CHILD(indices) == Variant("SubnetSplitFlushingToChild", indices)
+\* \* @type: $migrationState => Bool;
+Is_Mig_Flushing_To_Child(mig_state) == VariantTag(mig_state) = "SubnetSplitFlushingToChild"
 
 \* \* @type: Int => $migrationState;
 \* MIG_STARTED(registry_version) == Variant("Mig_Started", registry_version)
@@ -453,7 +458,7 @@ Remove_From_Migration_List(old_subnet_id, new_subnet_id, cs) ==
     /\ UNCHANGED << stream, subnet, next_req_id, headers, rescheduling_count >>
 *)
 
-Record_Outgoing_Indices(cs, parent_subnet_id) ==
+Start_Flush_To_All(cs, parent_subnet_id) ==
     /\ cs \in DOMAIN migration_procedure
     /\ Is_Mig_Enacted(migration_procedure[cs])
     /\ LET
@@ -462,20 +467,34 @@ Record_Outgoing_Indices(cs, parent_subnet_id) ==
       IN
         /\ \A s \in DOMAIN subnet: subnet[s].registry_version >= split_reg_version
         /\ migration_procedure' = Set_Migration_State(migration_procedure, cs, 
-            MIG_SUBNET_WATCHING_OUTGOING(outgoing_indices)
+            MIG_SUBNET_FLUSHING_TO_ALL(outgoing_indices)
            )
     /\ UNCHANGED << registry, headers, stream, subnet, next_req_id, migration_count, rescheduling_count >>
+
+Start_Flush_To_Child(cs, parent_subnet_id, child_subnet_id) ==
+    /\ cs \in DOMAIN migration_procedure
+    /\ Is_Mig_Flushing_To_All(migration_procedure[cs])
+    /\ LET
+        old_outgoing_indices == VariantGetUnsafe("SubnetSplitFlushingToAll", migration_procedure[cs])
+        new_outgoing_index == Len(stream[<< parent_subnet_id, child_subnet_id >>])
+      IN
+        /\ \A to \in SUBNET_ID:
+            /\ to \in DOMAIN old_outgoing_indices
+            /\ subnet[parent_subnet_id].outgoing_index[to] >= old_outgoing_indices[to]
+        /\ migration_procedure' = Set_Migration_State(migration_procedure, cs, 
+           MIG_SUBNET_FLUSHING_TO_CHILD(new_outgoing_index)
+           )
+    /\ UNCHANGED << registry, headers, stream, subnet, next_req_id, migration_count, rescheduling_count >>
+
 
 \* "Operator" event: start migrating a canister
 Finish_Migration(old_subnet_id, new_subnet_id, cs) ==
     /\ cs \in DOMAIN migration_procedure
-    /\ Is_Mig_Watching_Outgoing(migration_procedure[cs])
+    /\ Is_Mig_Flushing_To_Child(migration_procedure[cs])
     /\ LET
-        indices == VariantGetUnsafe("SubnetSplitWatchingOutgoing", migration_procedure[cs])
+        index == VariantGetUnsafe("SubnetSplitFlushingToChild", migration_procedure[cs])
       IN
-        /\ \A to \in SUBNET_ID \ {new_subnet_id}:
-            /\ to \in DOMAIN indices
-            /\ subnet[old_subnet_id].outgoing_index[to] >= indices[to]
+        /\ subnet[old_subnet_id].outgoing_index[new_subnet_id] >= index
     /\ migration_procedure' = Remove_Argument(migration_procedure, cs)
     /\ migration_count' = migration_count + 1
     /\ registry' = Append(registry, 
@@ -499,7 +518,8 @@ Migration_Procedure(from_subnet_id, to_subnet_id, cs) ==
     \/ Unhalt_Subnet(from_subnet_id, to_subnet_id, cs)
     \/ Remove_From_Migration_List(from_subnet_id, to_subnet_id, cs)
     *)
-    \/ Record_Outgoing_Indices(cs, from_subnet_id)
+    \/ Start_Flush_To_All(cs, from_subnet_id)
+    \/ Start_Flush_To_Child(cs, from_subnet_id, to_subnet_id)
     \/ Finish_Migration(from_subnet_id, to_subnet_id, cs)
 
 Init ==
