@@ -159,7 +159,7 @@ Set_Split_State(split_proc, cs, state) ==
 \* its old subnet to a new subnet.
 Enact_Split_Subnet(cs, from_subnet_id, to_subnet_id) == 
     /\ split_count < MAX_SPLITS
-    /\ \A canister_being_split \in DOMAIN splitting_procedure: canisters_being_split \intersect cs = {}
+    /\ \A canisters_being_split \in DOMAIN splitting_procedure: canisters_being_split \intersect cs = {}
     \* Sanity checks on the split procedure
     /\ Assert(
         to_subnet_id \notin DOMAIN subnet,
