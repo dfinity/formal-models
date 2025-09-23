@@ -3,8 +3,8 @@
 EXTENDS TLC
 
 SUBNET_ID_LIST == << "s1", "s2", "s3" >>
-INITIALLY_EXISTING_SUBNETS == { "s1", "s2" }
 CANISTER_ID_LIST == << "c1", "c2" >>
+INITIALLY_EXISTING_SUBNETS == { "s1", "s2" }
 
 INIT_ROUTING_TABLE == 
   LET 
@@ -13,7 +13,7 @@ INIT_ROUTING_TABLE ==
   IN
     c[1] :> [ on |-> s[1], migration_list |-> << >> ] 
     @@
-    plit
+    c[2] :> [ on |-> s[2], migration_list |-> << >> ]
 
 INITIAL_EXISTING == 
   LET 
@@ -35,7 +35,7 @@ VARIABLE
     headers,
     subnet, 
     next_req_id,
-    split_procedure,
+    splitting_procedure,
     split_count,
     rescheduling_count
 

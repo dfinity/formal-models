@@ -35,7 +35,7 @@ VARIABLE
     headers,
     subnet, 
     next_req_id,
-    split_procedure,
+    splitting_procedure,
     split_count,
     rescheduling_count
 
