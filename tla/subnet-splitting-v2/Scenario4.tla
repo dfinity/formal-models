@@ -1,4 +1,4 @@
----- MODULE Scenario5 ----
+---- MODULE Scenario4 ----
 
 EXTENDS TLC
 
