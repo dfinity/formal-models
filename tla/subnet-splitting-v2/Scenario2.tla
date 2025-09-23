@@ -13,7 +13,7 @@ INIT_ROUTING_TABLE ==
   IN
     c[1] :> [ on |-> s[1], migration_list |-> << >> ] 
     @@
-    c[2] :> [ on |-> s[2], migration_list |-> << >> ]
+    plit
 
 INITIAL_EXISTING == 
   LET 
@@ -22,7 +22,7 @@ INITIAL_EXISTING ==
   IN
     {c[1], c[2]}
 
-CANISTERS_TO_MIGRATE == 
+CANISTERS_TO_SPLIT_OFF == 
   LET 
     s == SUBNET_ID_LIST
     c == CANISTER_ID_LIST
