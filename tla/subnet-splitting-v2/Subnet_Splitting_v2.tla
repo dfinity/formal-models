@@ -300,7 +300,7 @@ Sanity_No_Responses_Exist == \A s \in DOMAIN subnet: \A c \in DOMAIN subnet[s].c
 Sanity_Split_Never_Finishes ==
     [][DOMAIN splitting_procedure \subseteq DOMAIN splitting_procedure']_vars
 
-Sanity_No_Canister_Ever_Moved ==
+Sanity_No_Canister_Ever_Moves ==
     [][\A s \in DOMAIN subnet: \A c \in DOMAIN subnet[s].canister:
         ~(\E s2 \in DOMAIN subnet' \ {s}: c \in DOMAIN subnet'[s2].canister)]_vars
 

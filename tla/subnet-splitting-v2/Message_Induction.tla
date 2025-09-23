@@ -27,21 +27,20 @@ induction_vars == << stream, registry, headers, subnet, rescheduling_count >>
 
 \* @type: ($subnetId, $subnetId, $message) => Bool;
 Sender_Ok(subnet_id, sending_subnet_id, msg) ==
-  LET 
+  LET
     reg == registry[subnet[subnet_id].registry_version]
     table == reg.routing_table
     mig_list_from == Migration_List(table, msg.from)
     mig_list_to == Migration_List(table, msg.to)
   IN
     \/ Hosted(table, msg.from, sending_subnet_id)
-    \/ 
-        \/ \E i, j \in 1..Len(mig_list_from): 
-            /\ mig_list_from[i] = sending_subnet_id  
+    \/ \E i, j \in 1..Len(mig_list_from):
+            /\ mig_list_from[i] = sending_subnet_id
             /\ Hosted(table, msg.from, mig_list_from[j])
-        \/ 
-            /\ Is_Response(msg)
+    \/ Is_Response(msg)
+        /\ \E i \in 1..Len(mig_list_to):
+            /\ mig_list_to[i] = sending_subnet_id
             /\ Hosted(table, msg.to, subnet_id)
-            /\ \E i \in 1..Len(mig_list_to): mig_list_to[i] = sending_subnet_id
  
  \* @type: ($subnetId, $message) => Bool;
 Recipient_Hosted(subnet_id, msg) ==
