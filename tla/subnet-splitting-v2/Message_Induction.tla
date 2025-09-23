@@ -221,7 +221,7 @@ Induct_Signal(subnet_id, sending_subnet_id) ==
             /\ stream' = Extend_Stream(stream, subnet_id, response_recipient_current_subnet, response)
             /\ UNCHANGED << registry >>
           [] Is_Rej(sig) /\ Is_Request(msg) ->
-            /\ subnet' = Queue_Message(subnet, subnet_id, response)
+            /\ subnet' = Increment_Outgoing(Queue_Message(subnet, subnet_id, response), subnet_id, sending_subnet_id)
             /\ headers' = Consume_One(headers, subnet_id, sending_subnet_id)
             /\ UNCHANGED << stream, registry, rescheduling_count >>
           [] Is_Rej(sig) /\ Is_Response(msg) -> Assert(FALSE, "Rejected a response from the current subnet")
