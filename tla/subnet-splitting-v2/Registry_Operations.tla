@@ -7,10 +7,6 @@ Apply_Registry_Update(registries, registry_version, s, subnet_id) ==
     reg == registries[registry_version]
     old_reg == registries[registry_version - 1]
     rt == reg.routing_table
-    \* TODO: we should probably only allow this if the subnet is unhalted,
-    \* but we'd need to make Split_State more fine-grained for this to work
-    \* (as we rely on applying the registry update on the parent in order to trim
-    \* the state of the existing canisters)
     state == s[subnet_id]
     canisters_to_remove == { c \in DOMAIN state.canister: /\ ~Hosted(rt, c, subnet_id)  }
     canisters_to_spin_off == { c \in DOMAIN rt : rt[c].migration_list # <<>> /\ rt[c].migration_list[1] = subnet_id }

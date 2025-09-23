@@ -35,8 +35,8 @@ VARIABLE
     headers,
     subnet, 
     next_req_id,
-    migration_procedure,
-    migration_count,
+    split_procedure,
+    split_count,
     rescheduling_count
 
 INSTANCE Subnet_Splitting_v2
