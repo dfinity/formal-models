@@ -1,4 +1,4 @@
----- MODULE Scenario2 ----
+---- MODULE Scenario3 ----
 
 EXTENDS TLC
 
@@ -13,7 +13,7 @@ INIT_ROUTING_TABLE ==
   IN
     c[1] :> [ on |-> s[1], migration_list |-> << >> ] 
     @@
-    c[2] :> [ on |-> s[2], migration_list |-> << >> ]
+    c[2] :> [ on |-> s[1], migration_list |-> << >> ]
 
 INITIAL_EXISTING == 
   LET 

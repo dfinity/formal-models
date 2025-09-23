@@ -1,4 +1,4 @@
----- MODULE Scenario5 ----
+---- MODULE Scenario2 ----
 
 EXTENDS TLC
 
@@ -13,21 +13,21 @@ INIT_ROUTING_TABLE ==
   IN
     c[1] :> [ on |-> s[1], migration_list |-> << >> ] 
     @@
-    c[2] :> [ on |-> s[1], migration_list |-> << >> ]
+    c[2] :> [ on |-> s[2], migration_list |-> << >> ]
 
 INITIAL_EXISTING == 
   LET 
     s == SUBNET_ID_LIST
     c == CANISTER_ID_LIST
   IN
-    {c[1]}
+    {c[1], c[2]}
 
 CANISTERS_TO_SPLIT_OFF == 
   LET 
     s == SUBNET_ID_LIST
     c == CANISTER_ID_LIST
   IN
-    {c[1], c[2]} :> [ from |-> s[1], to |-> s[3]]
+    {c[1]} :> [ from |-> s[1], to |-> s[3]]
 
 VARIABLE 
     stream,

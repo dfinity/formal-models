@@ -101,9 +101,13 @@ Increment_Incoming(s, receiving_id, sender_id) ==
 
 \* @type: ($subnetId -> $subnetState, $subnetId, $message) => $subnetId -> $subnetState;
 Queue_Message(s, subnet_id, msg) ==
-    [ s EXCEPT ![subnet_id] =
-            [ @ EXCEPT !.canister = [ @ EXCEPT ![msg.to] = [ @ EXCEPT !.queue = Append(@, [ message |-> msg, processed |-> FALSE ]) ]] ]
-        ]
+   [ s EXCEPT ![subnet_id] =
+            [ @ EXCEPT !.canister =
+                [ @ EXCEPT ![msg.to] =
+                    [ @ EXCEPT !.queue = Append(@, [ message |-> msg, processed |-> FALSE ]) ]
+                ]
+            ]
+    ]
 
 Subnet_Knows_Other_Subnet(subnet_id, other_subnet_id) ==
     other_subnet_id \in DOMAIN registry[subnet[subnet_id].registry_version].subnet_info
@@ -136,18 +140,26 @@ Induct_Message(subnet_id, sending_subnet_id) ==
             \* TODO: get reasonable error messages with TLC while keeping Apalache happy
             "Recipient not hosted, but not re-routing the message")
             \* "Recipient " \o msg.to \o " not hosted on " \o subnet_id \o " and message shouldn't be re-routed")
-        /\ CASE Recipient_Hosted(subnet_id, msg) /\ 
-              ~(Is_Request(msg) 
-                /\
-                    \/ ~Is_Running(subnet_id, msg.to) 
-                    \/ Thinks_Sender_Canister_Has_Moved(subnet_id, sending_subnet_id, msg.from))
-                ->
+        /\ CASE Recipient_Hosted(subnet_id, msg) /\
+                (Is_Request(msg) =>
+                    /\ Is_Running(subnet_id, msg.to)
+                    /\ ~Thinks_Sender_Canister_Has_Moved(subnet_id, sending_subnet_id, msg.from))
+               ->
+                \* Non-deterministically choose between inducting and rejecting a request (models having too many requests, for example)
+                \/
                     /\ Add_Header(subnet_id, sending_subnet_id, Ack(new_i))
                     /\ subnet' = Increment_Incoming(Queue_Message(subnet, subnet_id, msg), subnet_id, sending_subnet_id)
                     /\ UNCHANGED << stream, registry, rescheduling_count >>
-             [] \/ Recipient_Hosted(subnet_id, msg) /\ Is_Request(msg) /\ ~Is_Running(subnet_id, msg.to)
-                \/ ~Recipient_Hosted(subnet_id, msg) /\ Is_Request(msg) 
-                \/ Thinks_Sender_Canister_Has_Moved(subnet_id, sending_subnet_id, msg.from) /\ Is_Request(msg) ->
+                \/
+                    /\ Is_Request(msg)
+                    /\ Add_Header(subnet_id, sending_subnet_id, Rej(new_i))
+                    /\ subnet' = Increment_Incoming(subnet, subnet_id, sending_subnet_id)
+                    /\ UNCHANGED << stream, registry, rescheduling_count >>
+            [] Is_Request(msg) /\
+                    \/ ~Recipient_Hosted(subnet_id, msg)
+                    \/ Recipient_Hosted(subnet_id, msg) /\ ~Is_Running(subnet_id, msg.to)
+                    \/ Thinks_Sender_Canister_Has_Moved(subnet_id, sending_subnet_id, msg.from) /\ Is_Request(msg)
+                ->
                     /\ Add_Header(subnet_id, sending_subnet_id, Rej(new_i))
                     /\ subnet' = Increment_Incoming(subnet, subnet_id, sending_subnet_id)
                     /\ UNCHANGED << registry, rescheduling_count, stream >>

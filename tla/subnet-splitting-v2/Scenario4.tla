@@ -1,4 +1,4 @@
----- MODULE Scenario4 ----
+---- MODULE Scenario5 ----
 
 EXTENDS TLC
 
@@ -20,7 +20,7 @@ INITIAL_EXISTING ==
     s == SUBNET_ID_LIST
     c == CANISTER_ID_LIST
   IN
-    {c[1], c[2]}
+    {c[1]}
 
 CANISTERS_TO_SPLIT_OFF == 
   LET 

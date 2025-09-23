@@ -1,4 +1,4 @@
----- MODULE Scenario3 ----
+---- MODULE Scenario4 ----
 
 EXTENDS TLC
 
@@ -27,7 +27,7 @@ CANISTERS_TO_SPLIT_OFF ==
     s == SUBNET_ID_LIST
     c == CANISTER_ID_LIST
   IN
-    {c[1]} :> [ from |-> s[1], to |-> s[3]]
+    {c[1], c[2]} :> [ from |-> s[1], to |-> s[3]]
 
 VARIABLE 
     stream,
