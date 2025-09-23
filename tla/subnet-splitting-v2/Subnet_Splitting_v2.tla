@@ -108,17 +108,17 @@ MAX_RESCHEDULINGS == 1
 \* Has_Outgoing(indices) == Variant("Has_Outgoing", indices)
 \* @typeAlias: migrationState = 
 \* SubnetSplitEnacted(Int)
-\* | SubnetSplitFlushingToAll($subnetId -> Int)
+\* | SubnetSplitFlushingToAndFromAll($subnetId -> Int, $subnetId -> Int)
 \* | SubnetSplitFlushingToChild(Int);
 \* @type: Int => $migrationState;
 MIG_SUBNET_SPLIT_ENACTED(registry_version) == Variant("SubnetSplitEnacted", registry_version)
 \* \* @type: $migrationState => Bool;
 Is_Mig_Enacted(mig_state) == VariantTag(mig_state) = "SubnetSplitEnacted"
-MIG_SUBNET_FLUSHING_TO_ALL(indices) == Variant("SubnetSplitFlushingToAll", indices)
+MIG_SUBNET_FLUSHING_TO_AND_FROM_ALL(outgoing_indices, incoming_indices) == Variant("SubnetSplitFlushingToAndFromAll", << outgoing_indices, incoming_indices >>)
 \* \* @type: $migrationState => Bool;
-Is_Mig_Flushing_To_All(mig_state) == VariantTag(mig_state) = "SubnetSplitFlushingToAll"
+Is_Mig_Flushing_To_All(mig_state) == VariantTag(mig_state) = "SubnetSplitFlushingToAndFromAll"
 
-MIG_SUBNET_FLUSHING_TO_CHILD(indices) == Variant("SubnetSplitFlushingToChild", indices)
+MIG_SUBNET_FLUSHING_TO_CHILD(index) == Variant("SubnetSplitFlushingToChild", index)
 \* \* @type: $migrationState => Bool;
 Is_Mig_Flushing_To_Child(mig_state) == VariantTag(mig_state) = "SubnetSplitFlushingToChild"
 
@@ -458,16 +458,17 @@ Remove_From_Migration_List(old_subnet_id, new_subnet_id, cs) ==
     /\ UNCHANGED << stream, subnet, next_req_id, headers, rescheduling_count >>
 *)
 
-Start_Flush_To_All(cs, parent_subnet_id) ==
+Start_Flush_Parent_To_And_From_All(cs, parent_subnet_id) ==
     /\ cs \in DOMAIN migration_procedure
     /\ Is_Mig_Enacted(migration_procedure[cs])
     /\ LET
         split_reg_version == VariantGetUnsafe("SubnetSplitEnacted", migration_procedure[cs])
         outgoing_indices == [ sn2 \in SUBNET_ID |-> Len(stream[<< parent_subnet_id, sn2 >>])]
+        incoming_indices == [ sn2 \in SUBNET_ID |-> Len(stream[<< sn2, parent_subnet_id >>])]
       IN
         /\ \A s \in DOMAIN subnet: subnet[s].registry_version >= split_reg_version
         /\ migration_procedure' = Set_Migration_State(migration_procedure, cs, 
-            MIG_SUBNET_FLUSHING_TO_ALL(outgoing_indices)
+            MIG_SUBNET_FLUSHING_TO_AND_FROM_ALL(outgoing_indices, incoming_indices)
            )
     /\ UNCHANGED << registry, headers, stream, subnet, next_req_id, migration_count, rescheduling_count >>
 
@@ -475,12 +476,14 @@ Start_Flush_To_Child(cs, parent_subnet_id, child_subnet_id) ==
     /\ cs \in DOMAIN migration_procedure
     /\ Is_Mig_Flushing_To_All(migration_procedure[cs])
     /\ LET
-        old_outgoing_indices == VariantGetUnsafe("SubnetSplitFlushingToAll", migration_procedure[cs])
+        old_indices == VariantGetUnsafe("SubnetSplitFlushingToAndFromAll", migration_procedure[cs])
+        old_outgoing_indices == old_indices[1]
+        old_incoming_indices == old_indices[2]
         new_outgoing_index == Len(stream[<< parent_subnet_id, child_subnet_id >>])
       IN
         /\ \A to \in SUBNET_ID:
-            /\ to \in DOMAIN old_outgoing_indices
-            /\ subnet[parent_subnet_id].outgoing_index[to] >= old_outgoing_indices[to]
+            /\ to \in DOMAIN old_outgoing_indices => subnet[parent_subnet_id].outgoing_index[to] >= old_outgoing_indices[to]
+            /\ to \in DOMAIN old_incoming_indices => subnet[to].outgoing_index[parent_subnet_id] >= old_incoming_indices[to]
         /\ migration_procedure' = Set_Migration_State(migration_procedure, cs, 
            MIG_SUBNET_FLUSHING_TO_CHILD(new_outgoing_index)
            )
@@ -518,7 +521,7 @@ Migration_Procedure(from_subnet_id, to_subnet_id, cs) ==
     \/ Unhalt_Subnet(from_subnet_id, to_subnet_id, cs)
     \/ Remove_From_Migration_List(from_subnet_id, to_subnet_id, cs)
     *)
-    \/ Start_Flush_To_All(cs, from_subnet_id)
+    \/ Start_Flush_Parent_To_And_From_All(cs, from_subnet_id)
     \/ Start_Flush_To_Child(cs, from_subnet_id, to_subnet_id)
     \/ Finish_Migration(from_subnet_id, to_subnet_id, cs)
 
