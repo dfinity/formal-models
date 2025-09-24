@@ -367,15 +367,10 @@ Response_Fairness_Condition ==
         /\ WF_induction_vars(Induction!Induct_Message(s1, s2))
     /\ \A s1, s2 \in SUBNET_ID: \A c1, c2 \in CANISTER_ID:
         /\ WF_execution_vars(Execution!Send_Response(s1, s2, c1, c2))
+    /\ \A s1, s2 \in SUBNET_ID:
+        /\ WF_induction_vars(Induction!Induct_Signal(s1, s2))
     /\ \A cs \in DOMAIN CANISTERS_TO_SPLIT_OFF:
         /\ WF_vars(Enact_Split_Subnet(cs, CANISTERS_TO_SPLIT_OFF[cs].from, CANISTERS_TO_SPLIT_OFF[cs].to))
-        /\ \A s2 \in SUBNET_ID: 
-            \* Need to induct signals to the parent, such that we can unhalt
-            \* the child subnet
-            /\ WF_induction_vars(Induction!Induct_Signal(CANISTERS_TO_SPLIT_OFF[cs].from, s2))
-            \* Need to induct signals from the parent, such that we can reschedule
-            \* the responses on REJ signals
-            /\ WF_induction_vars(Induction!Induct_Signal(s2, CANISTERS_TO_SPLIT_OFF[cs].from))
 
 Spec == Init /\ []([Next]_vars) /\ Response_Fairness_Condition
 
