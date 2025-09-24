@@ -369,8 +369,6 @@ Response_Fairness_Condition ==
         /\ WF_execution_vars(Execution!Send_Response(s1, s2, c1, c2))
     /\ \A s1, s2 \in SUBNET_ID:
         /\ WF_induction_vars(Induction!Induct_Signal(s1, s2))
-    /\ \A cs \in DOMAIN CANISTERS_TO_SPLIT_OFF:
-        /\ WF_vars(Enact_Split_Subnet(cs, CANISTERS_TO_SPLIT_OFF[cs].from, CANISTERS_TO_SPLIT_OFF[cs].to))
 
 Spec == Init /\ []([Next]_vars) /\ Response_Fairness_Condition
 
